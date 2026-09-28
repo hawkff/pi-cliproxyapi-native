@@ -1,4 +1,4 @@
-# Pi CLIProxy Native
+# Pi CLIProxyAPI Native
 
 Use [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for chat, image generation, and video generation in [Pi](https://pi.dev).
 
@@ -8,11 +8,13 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 You need Pi 0.87.x and Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. This release targets CLIProxyAPI 7.3.11. The extension adds no runtime dependencies and needs no compilation.
 
+If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
+
 ```sh
-pi install npm:pi-cliproxy-native@0.1.2
+pi install npm:pi-cliproxyapi-native@0.1.3
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxy-native@v0.1.2`. For a local checkout, use `pi install /path/to/pi-cliproxy-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.3`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -220,7 +222,7 @@ For native roles that need explicit loading, add this extension to `subagentOnly
   "subagents": {
     "agentOverrides": {
       "reviewer": {
-        "subagentOnlyExtensions": ["/path/to/pi-cliproxy-native/extensions/index.ts"]
+        "subagentOnlyExtensions": ["/path/to/pi-cliproxyapi-native/extensions/index.ts"]
       }
     }
   }
