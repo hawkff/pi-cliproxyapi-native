@@ -11,7 +11,7 @@ import { isRecord } from "../src/config.ts";
 const run = promisify(execFile);
 
 test("npm package contains only release files and loads without checkout dependencies", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "pi-cliproxy-native-package-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-cliproxyapi-native-package-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const { stdout } = await run(
     "npm",
@@ -24,7 +24,7 @@ test("npm package contains only release files and loads without checkout depende
   assert.ok(Array.isArray(packed) && packed.length === 1);
   const entry: unknown = packed[0];
   assert.ok(isRecord(entry) && Array.isArray(entry.files));
-  assert.equal(entry.name, "pi-cliproxy-native");
+  assert.equal(entry.name, "pi-cliproxyapi-native");
   assert.ok(typeof entry.filename === "string");
   assert.equal(basename(entry.filename), entry.filename);
   assert.deepEqual(
