@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -50,6 +50,14 @@ test("npm package contains only release files and loads without checkout depende
   await run("tar", ["-xzf", join(directory, entry.filename), "-C", directory], {
     timeout: 10000,
   });
+  const manifest: unknown = JSON.parse(await readFile(join(directory, "package/package.json"), "utf8"));
+  assert.ok(isRecord(manifest) && Array.isArray(manifest.keywords));
+  for (const keyword of ["pi-package", "pi-extension", "cliproxyapi"])
+    assert.ok(manifest.keywords.includes(keyword));
+  assert.ok(isRecord(manifest.peerDependencies));
+  for (const name of ["pi-ai", "pi-coding-agent", "pi-tui"])
+    assert.equal(manifest.peerDependencies[`@earendil-works/${name}`], "*");
+  assert.equal(manifest.dependencies, undefined);
   const agent = pathToFileURL(resolve("node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href;
   await run(
     process.execPath,

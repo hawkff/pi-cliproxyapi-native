@@ -124,7 +124,7 @@ export function mediaControls(id: string) {
     aspect_ratio = commonRatios;
     if (capability.purpose === "image") {
       resolution = ["1k", "2k"];
-      // CLIProxyAPI 7.3.11 drops other xAI image ratios, including auto.
+      // CLIProxyAPI 8.0.7 drops other xAI image ratios, including auto.
       aspect_ratio.push("9:20", "20:9");
     } else {
       resolution = ["480p", "720p"];

@@ -146,6 +146,9 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
           ...options,
           onPayload,
           onResponse: options?.onResponse ? (response) => options.onResponse?.(response, model) : undefined,
+          onProviderStreamEvent: options?.onProviderStreamEvent
+            ? (event) => options.onProviderStreamEvent?.(event, model)
+            : undefined,
         });
       if (!backend) return run();
       return lazyStream(model, async () => ({

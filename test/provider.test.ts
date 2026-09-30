@@ -533,6 +533,7 @@ test("native adapters stream each family and qualified route through the right e
       const actualApi = source.api === "openai-codex-responses" ? "openai-responses" : source.api;
       let seenPath = "";
       let seenBody: unknown;
+      let providerEvents = 0;
       const baseUrl = await server(t, (req, res) => {
         assert.equal(req.headers.authorization, `Bearer ${key}`);
         assert.equal(req.headers["x-upstream-only"], undefined);
@@ -584,6 +585,15 @@ test("native adapters stream each family and qualified route through the right e
           maxRetries: 0,
           signal: AbortSignal.timeout(10000),
           reasoning: actualApi === "anthropic-messages" ? "high" : undefined,
+          async onProviderStreamEvent(event, hookModel) {
+            await Promise.resolve();
+            assert.ok(isRecord(event));
+            assert.equal(hookModel.id, source.id);
+            assert.equal(hookModel.provider, PROVIDER_ID);
+            assert.equal(hookModel.api, actualApi);
+            assert.ok(hookModel.baseUrl.startsWith(`${baseUrl}/gateway`));
+            providerEvents++;
+          },
         },
       );
       assert.equal(result.stopReason, "stop", result.errorMessage);
@@ -595,6 +605,7 @@ test("native adapters stream each family and qualified route through the right e
         "ok",
       );
       assert.equal(result.usage.output, 1);
+      assert.ok(providerEvents > 0);
       if (source.id.includes("/")) assert.equal(result.model, source.id);
       const expected =
         actualApi === "anthropic-messages"

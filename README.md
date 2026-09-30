@@ -6,15 +6,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-You need Pi 0.87.x and Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. This release targets CLIProxyAPI 7.3.11. The extension adds no runtime dependencies and needs no compilation.
+This release targets Pi 0.99.2 and CLIProxyAPI 8.0.7, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.1.3
+pi install npm:pi-cliproxyapi-native@0.1.4
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.3`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.4`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -112,7 +112,7 @@ GPT Image 1.5 accepts `auto`, `1024x1024`, `1536x1024`, and `1024x1536`. GPT Ima
 
 Gemini 3 Pro Image supports `1K`, `2K`, and `4K`. Gemini 3.1 Flash Image also supports `512`. Flash Lite Image supports `1K` only. Gemini 2.5 Flash Image has no resolution selector. Use the exact case shown in discovery, including uppercase `K` for Gemini and lowercase `k` for xAI.
 
-Aspect ratios vary by model and proxy route. For example, CLIProxyAPI 7.3.11 accepts `20:9` for xAI images but drops xAI's `21:9` and `auto` values. The extension rejects unsupported controls before authentication or network access instead of substituting another size or shape.
+Aspect ratios vary by model and proxy route. For example, CLIProxyAPI 8.0.7 accepts `20:9` for xAI images but drops xAI's `21:9` and `auto` values. The extension rejects unsupported controls before authentication or network access instead of substituting another size or shape.
 
 ```text
 Generate an image with gpt-image-2.5-sunburst at size 2048x2048.
@@ -207,7 +207,7 @@ Keep the full advertised ID when selecting a backend, for example:
 
 These examples select media defaults. Chat routes belong in Pi's built-in `/model` picker.
 
-Set the CLIProxyAPI auth record's top-level `prefix` to `vertex` or `antigravity` to advertise those routes. With `force-model-prefix: false`, the proxy retains bare IDs too. This extension does not change proxy configuration or restart it.
+Set the CLIProxyAPI auth record's top-level `prefix` to `vertex` or `antigravity` to advertise those routes. With `routing.force-model-prefix: false` in CLIProxyAPI 8, the proxy retains bare IDs too. Legacy configurations use the top-level `force-model-prefix` setting. This extension does not change proxy configuration or restart it.
 
 ## Thinking and child sessions
 
