@@ -9,7 +9,11 @@ import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  type ExtensionAPI,
+  type ExtensionToolContext,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { mapCatalog, mapMediaCatalog, mediaCapability, mediaControls, routedName } from "../src/catalog.ts";
 import { PROVIDER_ID, parseConfig } from "../src/config.ts";
 import {
@@ -1148,7 +1152,7 @@ test("OpenAI tool metadata, effective listing and progress stay local until exec
   const ctx = {
     ...context(await home(t)),
     model: builtinCatalog().find((model) => model.provider === "openai-codex"),
-  } as unknown as ExtensionContext;
+  } as unknown as ExtensionToolContext;
   const listed = await tools[0].execute("fixture", {}, undefined, undefined, ctx);
   assert.deepEqual(listed.details, {
     models: mapMediaCatalog(openaiCatalog),
