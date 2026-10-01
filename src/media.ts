@@ -136,11 +136,22 @@ function openaiImageResponse(config: Config, key: string, body: object, signal: 
       const transport = url.protocol === "https:" ? https : http;
       const options = "options" in transport.globalAgent ? transport.globalAgent.options : undefined;
       // Preserve configured proxies without inheriting the global agent's socket timeout.
+      const agent = new transport.Agent({
+        ...(isRecord(options) ? options : {}),
+        keepAlive: false,
+        timeout: 0,
+      });
+      const connect = agent.createConnection.bind(agent);
+      agent.createConnection = (connectionOptions, callback) => {
+        // Node assigns HTTPS proxy sockets to the request only after CONNECT completes.
+        const socket = connect(connectionOptions, callback);
+        return socket ? addAbortSignal(signal, socket) : socket;
+      };
       const request = transport.request(
         url,
         {
           method: "POST",
-          agent: new transport.Agent({ ...(isRecord(options) ? options : {}), keepAlive: false, timeout: 0 }),
+          agent,
           timeout: 0,
           signal,
           headers: {
