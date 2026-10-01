@@ -150,7 +150,7 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
             ? (event) => options.onProviderStreamEvent?.(event, model)
             : undefined,
         });
-      if (!backend) return run();
+      if (!google) return run();
       return lazyStream(model, async () => ({
         async *[Symbol.asyncIterator]() {
           for await (const event of run()) {

@@ -1291,6 +1291,156 @@ test("OpenAI native transport completes delayed headers and bodies beyond fetch'
   }
 });
 
+test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery", {
+  timeout: 20000,
+}, async (t) => {
+  if (!process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
+    t.skip("Node's environment proxy support is unavailable.");
+    return;
+  }
+  const cwd = await home(t);
+  const requests: string[] = [];
+  const respond = (req: IncomingMessage, res: ServerResponse) => {
+    assert.equal(req.headers.authorization, `Bearer ${key}`);
+    req.resume();
+    res.end(JSON.stringify(req.method === "GET" ? openaiCatalog : { data: [{ b64_json: png }] }));
+  };
+  const baseUrl = await server(t, (req, res) => {
+    requests.push(`origin ${req.method}`);
+    respond(req, res);
+  });
+  const tunnels = new WeakSet();
+  const proxyServer = createServer((req, res) => {
+    assert.equal(new URL(req.url ?? "", tunnels.has(req.socket) ? baseUrl : undefined).origin, baseUrl);
+    requests.push(`proxy ${req.method}`);
+    respond(req, res);
+  });
+  proxyServer.on("connect", (req, socket, head) => {
+    assert.equal(req.url, new URL(baseUrl).host);
+    tunnels.add(req.socket);
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    if (head.length) socket.unshift(head);
+    proxyServer.emit("connection", socket);
+  });
+  proxyServer.listen(0, "127.0.0.1");
+  await once(proxyServer, "listening");
+  t.after(async () => {
+    const closed = once(proxyServer, "close");
+    proxyServer.close();
+    proxyServer.closeAllConnections();
+    await closed;
+  });
+  const address = proxyServer.address();
+  assert.ok(address && typeof address !== "string");
+  const proxy = `http://127.0.0.1:${address.port}`;
+  for (const bypass of [false, true]) {
+    requests.length = 0;
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+        import assert from "node:assert/strict";
+        import { generateImage } from ${JSON.stringify(pathToFileURL(resolve("src/media.ts")).href)};
+        import { parseConfig } from ${JSON.stringify(pathToFileURL(resolve("src/config.ts")).href)};
+        const result = await generateImage(parseConfig({ baseUrl: ${JSON.stringify(baseUrl)} }),
+          { model: ${JSON.stringify(openaiIds[1])}, prompt: "fixture" },
+          { cwd: process.cwd(), model: undefined, modelRegistry: {
+            getProviderAuth: async () => ({ auth: { apiKey: ${JSON.stringify(key)} } })
+          } }, AbortSignal.timeout(5000));
+        assert.equal(result.details.files[0].mimeType, "image/png");
+        `,
+      ],
+      {
+        cwd,
+        timeout: 10000,
+        env: {
+          PATH: process.env.PATH,
+          HOME: cwd,
+          NODE_USE_ENV_PROXY: "1",
+          HTTP_PROXY: proxy,
+          NO_PROXY: bypass ? "127.0.0.1" : "",
+        },
+      },
+    );
+    const target = bypass ? "origin" : "proxy";
+    assert.deepEqual(requests, [`${target} GET`, `${target} POST`]);
+  }
+});
+
+test("OpenAI cancellation closes HTTPS proxy sockets before CONNECT completes", {
+  timeout: 15000,
+}, async (t) => {
+  if (!process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
+    t.skip("Node's environment proxy support is unavailable.");
+    return;
+  }
+  const cwd = await home(t);
+  const connected = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  const sockets = new Set<IncomingMessage["socket"]>();
+  const proxy = createServer(() => assert.fail("The image request must wait for CONNECT"));
+  proxy.on("connect", (req, socket) => {
+    assert.equal(req.url, "media.example:443");
+    assert.equal(req.headers.authorization, undefined);
+    sockets.add(req.socket);
+    socket.once("end", () => socket.end());
+    socket.once("close", () => {
+      sockets.delete(req.socket);
+      closed.resolve();
+    });
+    socket.resume();
+    connected.resolve();
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    proxy.close();
+  });
+  const address = proxy.address();
+  assert.ok(address && typeof address !== "string");
+  const pending = promisify(execFile)(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+      import assert from "node:assert/strict";
+      import { generateImage } from ${JSON.stringify(pathToFileURL(resolve("src/media.ts")).href)};
+      import { parseConfig } from ${JSON.stringify(pathToFileURL(resolve("src/config.ts")).href)};
+      globalThis.fetch = async (url) => {
+        assert.equal(url, "https://media.example/v1/models");
+        return Response.json(${JSON.stringify(openaiCatalog)});
+      };
+      const caller = new AbortController();
+      process.stdin.once("data", () => caller.abort());
+      await assert.rejects(generateImage(parseConfig({ baseUrl: "https://media.example" }),
+        { model: ${JSON.stringify(openaiIds[1])}, prompt: "fixture" },
+        { cwd: process.cwd(), model: undefined, modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: ${JSON.stringify(key)} } })
+        } }, caller.signal), /media request failed.*cancellation/);
+      `,
+    ],
+    {
+      cwd,
+      timeout: 5000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: cwd,
+        NODE_USE_ENV_PROXY: "1",
+        HTTPS_PROXY: `http://127.0.0.1:${address.port}`,
+      },
+    },
+  );
+  await Promise.race([connected.promise, pending]);
+  pending.child.stdin?.end("abort");
+  await pending;
+  await closed.promise;
+  assert.deepEqual(await readdir(cwd), []);
+});
+
 test("media discovery reports model-specific output controls and preserves qualified routes", () => {
   const models = mapMediaCatalog({
     data: [...openaiIds, ...ids, ...qualifiedGoogleIds].map((id) => ({ id })),

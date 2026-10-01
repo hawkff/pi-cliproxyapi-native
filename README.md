@@ -6,15 +6,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-This release targets Pi 0.99.2 and CLIProxyAPI 8.0.7, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+This release targets Pi 1.0.0 and CLIProxyAPI 8.0.7, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.1.4
+pi install npm:pi-cliproxyapi-native@0.1.5
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.4`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.5`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -237,7 +237,7 @@ Claude uses the legacy fine-grained tool-streaming header in place of eager tool
 
 OpenAI images POST `model`, `prompt`, and `n=1` to `/v1/images/generations`, without `response_format`. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
 
-OpenAI image POSTs use a dedicated HTTP connection so shorter transport timeouts do not interrupt the ten-minute deadline. They request identity encoding and reject compressed responses.
+OpenAI image POSTs use a dedicated HTTP connection and preserve Node's configured proxy routing. They disable socket timeouts so the ten-minute deadline controls the request, request identity encoding, and reject compressed responses.
 
 The implementation follows CLIProxyAPI v7.3.1's [OpenAI image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.3.1/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.3.1/internal/runtime/executor/codex_openai_images.go). The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
 
