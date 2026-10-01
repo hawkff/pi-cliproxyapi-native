@@ -556,7 +556,7 @@ test("native adapters stream each family and qualified route through the right e
       await models.refresh();
       const model = models.getModel(PROVIDER_ID, source.id);
       assert.ok(model);
-      const result = await models.completeSimple(
+      const stream = models.streamSimple(
         { ...model, baseUrl: "https://must-not-contact.example" },
         {
           systemPrompt: "fixture-system",
@@ -596,6 +596,12 @@ test("native adapters stream each family and qualified route through the right e
           },
         },
       );
+      const partials = new Set<AssistantMessage>();
+      for await (const event of stream) {
+        if ("partial" in event) partials.add(event.partial);
+      }
+      const result = await stream.result();
+      if (actualApi !== "google-generative-ai") assert.equal(partials.size, 1);
       assert.equal(result.stopReason, "stop", result.errorMessage);
       assert.equal(
         result.content

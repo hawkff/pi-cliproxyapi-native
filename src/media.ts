@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
+import * as http from "node:http";
+import * as https from "node:https";
 import { join } from "node:path";
 import { addAbortSignal, Readable } from "node:stream";
 import { type ImageContent, type Static, type TextContent, Type } from "@earendil-works/pi-ai";
@@ -133,12 +133,14 @@ function openaiImageResponse(config: Config, key: string, body: object, signal: 
   return new Promise<{ ok: boolean; status: number; body: ReturnType<typeof Readable.toWeb> | null }>(
     (resolve, reject) => {
       const url = new URL(`${config.baseUrl}/v1/images/generations`);
-      // A private agent and no socket timeout leave the overall signal in control of long image waits.
-      const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(
+      const transport = url.protocol === "https:" ? https : http;
+      const options = "options" in transport.globalAgent ? transport.globalAgent.options : undefined;
+      // Preserve configured proxies without inheriting the global agent's socket timeout.
+      const request = transport.request(
         url,
         {
           method: "POST",
-          agent: false,
+          agent: new transport.Agent({ ...(isRecord(options) ? options : {}), keepAlive: false, timeout: 0 }),
           timeout: 0,
           signal,
           headers: {

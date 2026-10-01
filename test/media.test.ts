@@ -1291,6 +1291,65 @@ test("OpenAI native transport completes delayed headers and bodies beyond fetch'
   }
 });
 
+test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery", {
+  timeout: 20000,
+}, async (t) => {
+  if (!process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
+    t.skip("Node's environment proxy support is unavailable.");
+    return;
+  }
+  const cwd = await home(t);
+  const requests: string[] = [];
+  const respond = (req: IncomingMessage, res: ServerResponse) => {
+    assert.equal(req.headers.authorization, `Bearer ${key}`);
+    req.resume();
+    res.end(JSON.stringify(req.method === "GET" ? openaiCatalog : { data: [{ b64_json: png }] }));
+  };
+  const baseUrl = await server(t, (req, res) => {
+    requests.push(`origin ${req.method}`);
+    respond(req, res);
+  });
+  const proxy = await server(t, (req, res) => {
+    assert.equal(new URL(req.url ?? "").origin, baseUrl);
+    requests.push(`proxy ${req.method}`);
+    respond(req, res);
+  });
+  for (const bypass of [false, true]) {
+    requests.length = 0;
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `
+        import assert from "node:assert/strict";
+        import { generateImage } from ${JSON.stringify(pathToFileURL(resolve("src/media.ts")).href)};
+        import { parseConfig } from ${JSON.stringify(pathToFileURL(resolve("src/config.ts")).href)};
+        const result = await generateImage(parseConfig({ baseUrl: ${JSON.stringify(baseUrl)} }),
+          { model: ${JSON.stringify(openaiIds[1])}, prompt: "fixture" },
+          { cwd: process.cwd(), model: undefined, modelRegistry: {
+            getProviderAuth: async () => ({ auth: { apiKey: ${JSON.stringify(key)} } })
+          } }, AbortSignal.timeout(5000));
+        assert.equal(result.details.files[0].mimeType, "image/png");
+        `,
+      ],
+      {
+        cwd,
+        timeout: 10000,
+        env: {
+          PATH: process.env.PATH,
+          HOME: cwd,
+          NODE_USE_ENV_PROXY: "1",
+          HTTP_PROXY: proxy,
+          NO_PROXY: bypass ? "127.0.0.1" : "",
+        },
+      },
+    );
+    const target = bypass ? "origin" : "proxy";
+    assert.deepEqual(requests, [`${target} GET`, `${target} POST`]);
+  }
+});
+
 test("media discovery reports model-specific output controls and preserves qualified routes", () => {
   const models = mapMediaCatalog({
     data: [...openaiIds, ...ids, ...qualifiedGoogleIds].map((id) => ({ id })),
