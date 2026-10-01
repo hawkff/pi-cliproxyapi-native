@@ -1309,11 +1309,28 @@ test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery",
     requests.push(`origin ${req.method}`);
     respond(req, res);
   });
-  const proxy = await server(t, (req, res) => {
-    assert.equal(new URL(req.url ?? "").origin, baseUrl);
+  const proxyServer = createServer((req, res) => {
+    assert.equal(new URL(req.url ?? "", baseUrl).origin, baseUrl);
     requests.push(`proxy ${req.method}`);
     respond(req, res);
   });
+  proxyServer.on("connect", (req, socket, head) => {
+    assert.equal(req.url, new URL(baseUrl).host);
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+    if (head.length) socket.unshift(head);
+    proxyServer.emit("connection", socket);
+  });
+  proxyServer.listen(0, "127.0.0.1");
+  await once(proxyServer, "listening");
+  t.after(async () => {
+    const closed = once(proxyServer, "close");
+    proxyServer.close();
+    proxyServer.closeAllConnections();
+    await closed;
+  });
+  const address = proxyServer.address();
+  assert.ok(address && typeof address !== "string");
+  const proxy = `http://127.0.0.1:${address.port}`;
   for (const bypass of [false, true]) {
     requests.length = 0;
     await promisify(execFile)(
