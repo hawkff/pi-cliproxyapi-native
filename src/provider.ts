@@ -184,7 +184,9 @@ function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandl
       const model = { ...selected, baseUrl: endpoint(config.baseUrl, selected.api) };
       const { metadataId, backend } = modelRoute(model.id);
       const google = backend && model.api === "google-generative-ai";
-      const liveClaude = model.api === "anthropic-messages" && !backend;
+      const managementKey =
+        options?.env?.CLIPROXYAPI_MANAGEMENT_KEY ?? process.env.CLIPROXYAPI_MANAGEMENT_KEY ?? "";
+      const liveClaude = model.api === "anthropic-messages" && !backend && managementKey !== "";
       const adapterModel = google ? { ...model, id: metadataId } : model;
       // Google needs canonical IDs for tool turns. Swap identities to keep bare history cross-route.
       const adapterContext = google
@@ -271,14 +273,11 @@ function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandl
                   quotaDeadline ??= Date.now() + 7 * 86400000 + 1000;
                   try {
                     // Keep quota waits outside HTTP timeouts and within one fixed weekly deadline.
+                    let waited = false;
                     if (checkClaude) {
-                      const key =
-                        options?.env?.CLIPROXYAPI_MANAGEMENT_KEY ??
-                        process.env.CLIPROXYAPI_MANAGEMENT_KEY ??
-                        "";
-                      await waitForClaudeQuota(
+                      waited = await waitForClaudeQuota(
                         config,
-                        key,
+                        managementKey,
                         model.id,
                         quotaDeadline,
                         options?.signal,
@@ -286,11 +285,18 @@ function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandl
                         typeof failure?.message === "string" &&
                           /would exceed your account's rate limit/i.test(failure.message),
                       );
-                    } else if (resetAt) {
+                    }
+                    if (!waited) {
+                      if (!resetAt) {
+                        yield event;
+                        return;
+                      }
                       if (resetAt > quotaDeadline)
                         throw new Error("The seven-day quota waiting deadline was reached.");
                       await waitForQuota(resetAt, options?.signal, onWait);
                     }
+                    if (Date.now() >= quotaDeadline)
+                      throw new Error("The seven-day quota waiting deadline was reached.");
                   } catch (error) {
                     const reason = options?.signal?.aborted ? ("aborted" as const) : ("error" as const);
                     yield {

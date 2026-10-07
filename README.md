@@ -179,7 +179,7 @@ Run `/cliproxyapi-refresh` to update the chat catalog.
 
 ### Wait for quota reset
 
-Claude subscription requests enter quota handling on the first quota rejection, before SDK or Pi retries. Set `CLIPROXYAPI_MANAGEMENT_KEY` in Pi's environment to enable live lookup. The extension asks CLIProxyAPI to fetch Claude's OAuth usage, using the same upstream endpoint as the management dashboard. It reads absolute `resets_at` timestamps.
+Set `CLIPROXYAPI_MANAGEMENT_KEY` in Pi's environment to enable live Claude quota lookup. With live lookup enabled, Claude subscription requests enter quota handling on the first quota rejection, before SDK or Pi retries. The extension asks CLIProxyAPI to fetch Claude's OAuth usage, using the same upstream endpoint as the management dashboard. It reads absolute `resets_at` timestamps.
 
 The extension refreshes usage every minute while waiting and at the reported reset, with a one-second buffer. It checks the five-hour allowance and applicable weekly limits, including model-specific limits. A request that would exceed the remaining account allowance can wait for the five-hour reset before utilization reaches 100%. For an account pool, it considers enabled Claude subscription accounts that advertise the selected model and uses the earliest eligible recovery. The terminal countdown follows updated reset times. Cancel the current request to stop waiting; closing or reloading Pi discards the wait.
 
@@ -193,7 +193,9 @@ Weekly exhaustion stops the request by default and reports the reset time. To wa
 }
 ```
 
-Missing management access, rejected account credentials, invalid usage data, or an exhausted allowance with an expired reset stop the quota wait with an explanation. These failures do not trigger Pi's quick retries. Repeated waits share one fixed seven-day deadline per provider call; a new cooldown cannot extend it. The extension does not replay a request that has started streaming.
+Without a management key, Claude retains its SDK retry settings and response-based waits. If live usage shows available quota before a wait begins, the extension uses valid response reset timing or returns the original error for Pi's bounded retries.
+
+Invalid management credentials, rejected account access, invalid usage data, or an exhausted allowance with an expired reset stop the quota wait with an explanation. These failures do not trigger Pi's quick retries. Extension-managed waits share one fixed seven-day deadline per provider call; a new cooldown cannot extend it. The extension checks the deadline after waking and before accepting available quota, including after machine sleep. It does not replay a request that has started streaming.
 
 Management requests stay on the configured proxy and reject redirects. Account access tokens stay in CLIProxyAPI. The extension reads account metadata and proxies usage GETs; it does not reset quotas, change credentials, or clear proxy cooldowns. Management keys grant broader access than chat keys, so keep them private. Live lookup supports up to 100 active Claude subscription accounts.
 

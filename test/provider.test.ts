@@ -1156,24 +1156,36 @@ test("successive live cooldowns use new reset times and cancellation stops the s
     });
 });
 
-test("weekly exhaustion stops once, can opt into waiting, and live lookup failures do not trigger Pi retries", {
-  timeout: 10000,
+test("weekly policy and transient fallback keep distinct retry behavior", {
+  timeout: 20000,
 }, async (t) => {
-  for (const mode of ["weekly", "weekly-wait", "missing-key", "rejected", "stale", "ready"] as const)
+  for (const mode of [
+    "weekly",
+    "weekly-wait",
+    "missing-key",
+    "missing-key-header",
+    "rejected",
+    "stale",
+    "ready",
+    "ready-header",
+  ] as const)
     await t.test(mode, async (t) => {
       const now = Date.parse("2030-01-01T00:00:00Z");
-      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+      t.mock.timers.enable({ apis: ["Date"], now });
+      const headerWait = mode.endsWith("-header");
+      const retryable = mode === "missing-key" || mode === "ready";
       let requests = 0;
       const controller = new AbortController();
       const baseUrl = await server(t, (req, res) => {
         req.resume();
         requests++;
+        if (headerWait) res.setHeader("retry-after", "900");
         claudeCooldown(res);
       });
       const seen = mockClaudeManagement(t, baseUrl, () =>
         claudeUsage(
           now + (mode === "stale" ? -1 : 900000),
-          mode === "ready" ? 0 : 100,
+          mode.startsWith("ready") ? 0 : 100,
           mode.startsWith("weekly") ? 100 : 25,
         ),
       );
@@ -1181,7 +1193,7 @@ test("weekly exhaustion stops once, can opt into waiting, and live lookup failur
       const config = parseConfig({ baseUrl, quota: { waitForWeeklyReset: mode === "weekly-wait" } });
       const provider = createCliproxyProvider(config, known, (_id, seconds) => {
         if (seconds !== undefined) {
-          assert.equal(mode, "weekly-wait");
+          assert.ok(mode === "weekly-wait" || headerWait);
           controller.abort();
         }
       });
@@ -1193,22 +1205,21 @@ test("weekly exhaustion stops once, can opt into waiting, and live lookup failur
             apiKey: key,
             maxRetries: 3,
             signal: controller.signal,
-            env: { CLIPROXYAPI_MANAGEMENT_KEY: mode === "missing-key" ? "" : "fixture-management-key" },
+            env: {
+              CLIPROXYAPI_MANAGEMENT_KEY: mode.startsWith("missing-key") ? "" : "fixture-management-key",
+            },
           },
         )
         .result();
-      assert.equal(requests, 1);
-      assert.equal(result.stopReason, mode === "weekly-wait" ? "aborted" : "error");
-      assert.equal(isRetryableAssistantError(result), false);
+      assert.equal(requests, mode === "missing-key" ? 4 : 1);
+      assert.equal(result.stopReason, mode === "weekly-wait" || headerWait ? "aborted" : "error");
+      assert.equal(isRetryableAssistantError(result), retryable);
       assert.ok(!result.errorMessage?.includes("fixture-management-key"));
       if (mode === "weekly") {
         assert.match(result.errorMessage ?? "", /Seven-day quota.*2030-01-02T00:15:00.000Z/);
         assert.match(result.errorMessage ?? "", /quota.waitForWeeklyReset/);
       }
-      if (mode === "missing-key") {
-        assert.equal(seen.calls, 0);
-        assert.match(result.errorMessage ?? "", /CLIPROXYAPI_MANAGEMENT_KEY/);
-      }
+      if (mode.startsWith("missing-key")) assert.equal(seen.calls, 0);
     });
 });
 
@@ -1343,6 +1354,43 @@ test("repeated header cooldowns cannot extend the original weekly waiting deadli
   assert.equal(requests, 2);
   assert.match(result.errorMessage ?? "", /waiting deadline/);
   assert.equal(isRetryableAssistantError(result), false);
+});
+
+test("late wake-ups cannot retry chat after the quota deadline even when live quota becomes ready", {
+  timeout: 15000,
+}, async (t) => {
+  for (const live of [false, true])
+    await t.test(String(live), async (t) => {
+      const now = Date.parse("2030-01-01T00:00:00Z");
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+      let requests = 0;
+      const waiting = Promise.withResolvers<void>();
+      const baseUrl = await server(t, (req, res) => {
+        req.resume();
+        requests++;
+        if (live) claudeCooldown(res);
+        else res.writeHead(429, { "retry-after": "900" }).end();
+      });
+      const seen = mockClaudeManagement(t, baseUrl, () =>
+        claudeUsage(now + 900000, seen.calls === 1 ? 100 : 0),
+      );
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        if (seconds !== undefined) waiting.resolve();
+      });
+      const stream = provider.streamSimple(
+        mapCatalog(catalog, config, known).models[live ? 0 : 1],
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" } },
+      );
+      await waiting.promise;
+      t.mock.timers.tick(7 * 86400000 + 2000);
+      const result = await stream.result();
+      assert.equal(requests, 1);
+      assert.equal(result.stopReason, "error");
+      assert.match(result.errorMessage ?? "", /waiting deadline/);
+      assert.equal(isRetryableAssistantError(result), false);
+    });
 });
 
 test("native Anthropic requests retain Antigravity high IDs and separate thinking effort", async (t) => {

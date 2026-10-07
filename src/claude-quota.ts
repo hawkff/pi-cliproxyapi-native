@@ -254,17 +254,11 @@ export async function waitForClaudeQuota(
         remainingInsufficient && (retryAt === undefined || Date.now() < retryAt),
       );
       signal?.throwIfAborted();
-      if (quota.state === "ready") {
-        if (retryAt === undefined)
-          throw new Error(
-            "Live Claude quota is available, but the proxy rejected the request. Check its cooldown state.",
-          );
-        return;
-      }
-      if (quota.retryAt > deadline || Date.now() >= deadline)
+      if (Date.now() >= deadline || (quota.state === "blocked" && quota.retryAt > deadline))
         throw new Error(
           "The seven-day quota waiting deadline was reached. Start a new request after confirming account access.",
         );
+      if (quota.state === "ready") return retryAt !== undefined;
       retryAt = quota.retryAt;
       const refreshAt = Math.min(quota.retryAt, Date.now() + 60000);
       while (Date.now() < refreshAt) {
