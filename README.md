@@ -44,6 +44,7 @@ Set `CLIPROXYAPI_BASE_URL` or create `~/.pi/agent/pi-cliproxyapi.json`:
 | --- | --- |
 | `CLIPROXYAPI_BASE_URL` | Overrides `baseUrl` in the configuration file. |
 | `CLIPROXYAPI_API_KEY` | Supplies a client key when Pi has no stored login credential. |
+| `CLIPROXYAPI_MANAGEMENT_KEY` | Enables live Claude quota lookup through the same proxy's management API. Keep this separate from the client key. |
 
 Use an absolute URL. Root URLs and URLs ending in `/v1` or `/v1beta` work; the extension preserves path prefixes. Remote endpoints require HTTPS. HTTP works on loopback addresses. URLs cannot contain credentials, query strings, or fragments.
 
@@ -178,13 +179,25 @@ Run `/cliproxyapi-refresh` to update the chat catalog.
 
 ### Wait for quota reset
 
-Chat requests wait for a reported quota reset, then retry the same turn. These waits do not consume Pi's agent-level retry attempts. The terminal shows a countdown; cancel the current request to stop waiting. Keep Pi running, since closing or reloading the session discards the wait.
+Claude subscription requests enter quota handling on the first quota rejection, before SDK or Pi retries. Set `CLIPROXYAPI_MANAGEMENT_KEY` in Pi's environment to enable live lookup. The extension asks CLIProxyAPI to fetch Claude's OAuth usage, using the same upstream endpoint as the management dashboard. It reads absolute `resets_at` timestamps.
 
-The extension accepts `Retry-After` on HTTP 429 responses and on HTTP 403 responses with a recognized quota error. It also accepts `reset_seconds` in CLIProxyAPI's `model_cooldown` errors. Google's native adapter exposes only the structured error body, so Google routes need `model_cooldown` and `reset_seconds`.
+The extension refreshes usage every minute while waiting and at the reported reset, with a one-second buffer. It checks the five-hour allowance and applicable weekly limits, including model-specific limits. A request that would exceed the remaining account allowance can wait for the five-hour reset before utilization reaches 100%. For an account pool, it considers enabled Claude subscription accounts that advertise the selected model and uses the earliest eligible recovery. The terminal countdown follows updated reset times. Cancel the current request to stop waiting; closing or reloading Pi discards the wait.
 
-Reset times must be in the future and no more than seven days away. The extension adds a one-second buffer and honors further cooldown responses after retrying. It does not assume a five-hour reset will clear a weekly limit. The extension leaves errors without valid reset timing to Pi and does not replay requests that have started streaming.
+Weekly exhaustion stops the request by default and reports the reset time. To wait for weekly resets too, merge this setting into `~/.pi/agent/pi-cliproxyapi.json`, then run `/reload`:
 
-This uses failed chat responses, without management credentials or quota polling. Image and video generation still do not retry.
+```json
+{
+  "quota": {
+    "waitForWeeklyReset": true
+  }
+}
+```
+
+Missing management access, rejected account credentials, invalid usage data, or an exhausted allowance with an expired reset stop the quota wait with an explanation. These failures do not trigger Pi's quick retries. Repeated waits share one fixed seven-day deadline per provider call; a new cooldown cannot extend it. The extension does not replay a request that has started streaming.
+
+Management requests stay on the configured proxy and reject redirects. Account access tokens stay in CLIProxyAPI. The extension reads account metadata and proxies usage GETs; it does not reset quotas, change credentials, or clear proxy cooldowns. Management keys grant broader access than chat keys, so keep them private. Live lookup supports up to 100 active Claude subscription accounts.
+
+Other chat routes retain the response-based fallback: `Retry-After` on HTTP 429 or a recognized quota HTTP 403, or `reset_seconds` in a `model_cooldown` error. Google's native adapter exposes only the structured error body. Those waits share the same seven-day deadline but cannot inspect live weekly usage. Image and video generation still do not retry.
 
 ### Aliases and model limits
 

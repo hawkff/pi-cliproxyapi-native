@@ -28,11 +28,19 @@ export function normalizeBaseUrl(value: string) {
 }
 
 export function parseConfig(value: unknown, baseUrlOverride?: string) {
-  if (!isRecord(value) || Object.keys(value).some((key) => !["baseUrl", "aliases"].includes(key))) {
-    throw new Error("pi-cliproxyapi.json accepts only baseUrl and aliases.");
+  if (!isRecord(value) || Object.keys(value).some((key) => !["baseUrl", "aliases", "quota"].includes(key))) {
+    throw new Error("pi-cliproxyapi.json accepts only baseUrl, aliases, and quota.");
   }
   if (value.baseUrl !== undefined && typeof value.baseUrl !== "string") {
     throw new Error("CLIProxyAPI baseUrl must be a string.");
+  }
+  const quota = value.quota === undefined ? {} : value.quota;
+  if (
+    !isRecord(quota) ||
+    Object.keys(quota).some((key) => key !== "waitForWeeklyReset") ||
+    (quota.waitForWeeklyReset !== undefined && typeof quota.waitForWeeklyReset !== "boolean")
+  ) {
+    throw new Error("CLIProxyAPI quota accepts only a boolean waitForWeeklyReset.");
   }
   const rawAliases = value.aliases === undefined ? {} : value.aliases;
   if (!isRecord(rawAliases)) throw new Error("CLIProxyAPI aliases must be an object.");
@@ -58,6 +66,7 @@ export function parseConfig(value: unknown, baseUrlOverride?: string) {
   return {
     baseUrl: normalizeBaseUrl(baseUrlOverride ?? value.baseUrl ?? DEFAULT_BASE_URL),
     aliases,
+    quota: { waitForWeeklyReset: quota.waitForWeeklyReset ?? false },
   };
 }
 
