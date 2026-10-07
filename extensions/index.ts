@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { PROVIDER_ID, parseConfig } from "../src/config.ts";
 import { registerMediaTools } from "../src/media.ts";
 import { registerModelPicker } from "../src/picker.ts";
@@ -22,7 +22,37 @@ export default async function (pi: ExtensionAPI) {
     throw new Error("pi-cliproxyapi.json must contain valid JSON.");
   }
   const config = parseConfig(raw, process.env.CLIPROXYAPI_BASE_URL);
-  pi.registerProvider(createCliproxyProvider(config));
+  let context: ExtensionContext | undefined;
+  const waits = new Map<symbol, number>();
+  pi.on("session_start", (_event, ctx) => {
+    context = ctx;
+  });
+  pi.on("session_shutdown", () => {
+    context?.ui.setStatus("cliproxyapi-quota", undefined);
+    context = undefined;
+    waits.clear();
+  });
+  pi.registerProvider(
+    createCliproxyProvider(config, undefined, (id, seconds) => {
+      if (!context) return;
+      if (seconds === undefined) waits.delete(id);
+      else {
+        if (!waits.has(id)) {
+          const message = `CLIProxyAPI quota limit. Retrying at ${new Date(Date.now() + seconds * 1000).toLocaleString()}. Cancel the current request to stop waiting.`;
+          if (context.mode === "print" || context.mode === "json") process.stderr.write(`${message}\n`);
+          else context.ui.notify(message, "warning");
+        }
+        waits.set(id, seconds);
+      }
+      const remaining = Math.min(...waits.values());
+      context.ui.setStatus(
+        "cliproxyapi-quota",
+        waits.size
+          ? `CLIProxyAPI quota: retry in ${Math.floor(remaining / 3600)}h ${Math.floor(remaining / 60) % 60}m ${remaining % 60}s`
+          : undefined,
+      );
+    }),
+  );
   registerMediaTools(pi, config);
   registerModelPicker(pi, config);
   pi.registerCommand("cliproxyapi-refresh", {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   type Api,
   createProvider,
@@ -18,7 +19,10 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { type CpaApi, endpoint, mapCatalog, modelRoute } from "./catalog.ts";
+import { type QuotaWaitHandler, waitForClaudeQuota } from "./claude-quota.ts";
 import { type Config, isRecord, PROVIDER_ID } from "./config.ts";
+
+export type { QuotaWaitHandler } from "./claude-quota.ts";
 
 export function builtinCatalog() {
   return [
@@ -106,14 +110,83 @@ export function nonStrictTools(payload: unknown) {
   };
 }
 
-function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
+function quotaError(message: string | undefined) {
+  let error: unknown;
+  if (message && message.length <= 65536) {
+    try {
+      const body: unknown = JSON.parse(message.slice(message.indexOf("{"), message.lastIndexOf("}") + 1));
+      error = isRecord(body) && isRecord(body.error) ? body.error : body;
+    } catch {
+      // SDK messages without a JSON body can still carry Retry-After headers.
+    }
+  }
+  return isRecord(error) ? error : undefined;
+}
+
+const quotaErrorTypes = ["model_cooldown", "rate_limit_error", "rate_limit_exceeded", "usage_limit_reached"];
+
+function isQuotaFailure(error: ReturnType<typeof quotaError>, status?: number) {
+  const code = error?.code ?? error?.type;
+  if (code === "permission_error" || code === "authentication_error") return false;
+  const quota = typeof code === "string" && quotaErrorTypes.includes(code);
+  return status === undefined ? code === "model_cooldown" : status === 429 || (status === 403 && quota);
+}
+
+export function quotaRetryAt(
+  message: string | undefined,
+  response?: Pick<Response, "status" | "headers">,
+  now = Date.now(),
+) {
+  const error = quotaError(message);
+  if (!isQuotaFailure(error, response?.status)) return undefined;
+  const resets: number[] = [];
+  const retryAfter = response?.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const serverDate = Date.parse(response?.headers.get("date") ?? "");
+    resets.push(
+      /^\d+$/.test(retryAfter)
+        ? now + Number(retryAfter) * 1000
+        : now + Date.parse(retryAfter) - (Number.isFinite(serverDate) ? serverDate : now),
+    );
+  }
+  const code = error?.code ?? error?.type;
+  if (
+    typeof code === "string" &&
+    quotaErrorTypes.includes(code) &&
+    typeof error?.reset_seconds === "number"
+  ) {
+    resets.push(now + error.reset_seconds * 1000);
+  }
+  // Support five-hour and weekly windows without trusting unbounded server delays.
+  const valid = resets.filter((at) => Number.isSafeInteger(at) && at > now && at - now <= 7 * 86400000);
+  return valid.length ? Math.max(...valid) + 1000 : undefined;
+}
+
+async function waitForQuota(resetAt: number, signal?: AbortSignal, onWait?: QuotaWaitHandler) {
+  const id = Symbol();
+  try {
+    for (let remaining = resetAt - Date.now(); remaining > 0; remaining = resetAt - Date.now()) {
+      signal?.throwIfAborted();
+      onWait?.(id, Math.ceil(remaining / 1000));
+      await sleep(Math.min(remaining, 1000), undefined, { signal });
+    }
+    signal?.throwIfAborted();
+  } finally {
+    onWait?.(id, undefined);
+  }
+}
+
+function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandler): ProviderStreams {
   const wrap =
     (stream: ProviderStreams["streamSimple"]): ProviderStreams["streamSimple"] =>
     (selected, context, options) => {
       // A resumed selection must not send the current key to an old endpoint.
-      const model = { ...selected, baseUrl: endpoint(baseUrl, selected.api) };
+      const model = { ...selected, baseUrl: endpoint(config.baseUrl, selected.api) };
       const { metadataId, backend } = modelRoute(model.id);
       const google = backend && model.api === "google-generative-ai";
+      const managementKey =
+        options?.env?.CLIPROXYAPI_MANAGEMENT_KEY ?? process.env.CLIPROXYAPI_MANAGEMENT_KEY ?? "";
+      const liveClaude = model.api === "anthropic-messages" && !backend && managementKey !== "";
       const adapterModel = google ? { ...model, id: metadataId } : model;
       // Google needs canonical IDs for tool turns. Swap identities to keep bare history cross-route.
       const adapterContext = google
@@ -145,22 +218,114 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
         const result = await options?.onPayload?.(adapted, model);
         return result === undefined ? adapted : result;
       };
-      const run = () =>
-        stream(adapterModel, adapterContext, {
+      let response: Pick<Response, "status" | "headers"> | undefined;
+      const run = () => {
+        response = undefined;
+        return stream(adapterModel, adapterContext, {
           ...options,
+          // Google rejects custom fetch; its structured cooldown body remains available on errors.
+          fetch:
+            model.api === "google-generative-ai"
+              ? options?.fetch
+              : async (input, init) => {
+                  response = undefined;
+                  const result = await (options?.fetch ?? globalThis.fetch)(input, init);
+                  response = { status: result.status, headers: result.headers };
+                  if (liveClaude && result.status === 429) {
+                    // Inspect the first quota rejection without disabling transient-error retries.
+                    const headers = new Headers(result.headers);
+                    headers.set("x-should-retry", "false");
+                    return new Response(result.body, {
+                      status: result.status,
+                      statusText: result.statusText,
+                      headers,
+                    });
+                  }
+                  return result;
+                },
           onPayload,
           onResponse: options?.onResponse ? (response) => options.onResponse?.(response, model) : undefined,
           onProviderStreamEvent: options?.onProviderStreamEvent
             ? (event) => options.onProviderStreamEvent?.(event, model)
             : undefined,
         });
-      if (!google) return run();
+      };
       return lazyStream(model, async () => ({
         async *[Symbol.asyncIterator]() {
-          for await (const event of run()) {
-            if (event.type === "done") yield { ...event, message: { ...event.message, model: model.id } };
-            else if (event.type === "error") yield { ...event, error: { ...event.error, model: model.id } };
-            else yield { ...event, partial: { ...event.partial, model: model.id } };
+          let quotaDeadline: number | undefined;
+          for (;;) {
+            let started = false;
+            let retry = false;
+            for await (const event of run()) {
+              if (event.type === "error" && event.reason === "error" && !started) {
+                const resetAt = quotaRetryAt(event.error.errorMessage, response);
+                const failure = quotaError(event.error.errorMessage);
+                const upstream =
+                  failure?.provider ??
+                  (typeof failure?.message === "string"
+                    ? /via provider ([\w-]+)/.exec(failure.message)?.[1]
+                    : undefined);
+                const checkClaude =
+                  liveClaude &&
+                  (upstream === undefined || upstream === "claude") &&
+                  isQuotaFailure(failure, response?.status);
+                if ((checkClaude || resetAt) && !options?.signal?.aborted) {
+                  quotaDeadline ??= Date.now() + 7 * 86400000 + 1000;
+                  try {
+                    // Keep quota waits outside HTTP timeouts and within one fixed weekly deadline.
+                    let waited = false;
+                    if (checkClaude) {
+                      waited = await waitForClaudeQuota(
+                        config,
+                        managementKey,
+                        model.id,
+                        quotaDeadline,
+                        options?.signal,
+                        onWait,
+                        typeof failure?.message === "string" &&
+                          /would exceed your account's rate limit/i.test(failure.message),
+                      );
+                    }
+                    if (!waited) {
+                      if (!resetAt) {
+                        yield event;
+                        return;
+                      }
+                      if (resetAt > quotaDeadline)
+                        throw new Error("The seven-day quota waiting deadline was reached.");
+                      await waitForQuota(resetAt, options?.signal, onWait);
+                    }
+                    if (Date.now() >= quotaDeadline)
+                      throw new Error("The seven-day quota waiting deadline was reached.");
+                  } catch (error) {
+                    const reason = options?.signal?.aborted ? ("aborted" as const) : ("error" as const);
+                    yield {
+                      type: "error" as const,
+                      reason,
+                      error: {
+                        ...event.error,
+                        model: model.id,
+                        stopReason: reason,
+                        errorMessage:
+                          reason === "aborted"
+                            ? "Request was aborted during the quota wait."
+                            : `CLIProxyAPI quota wait stopped. ${error instanceof Error ? error.message : "Live quota could not be verified."}`,
+                      },
+                    };
+                    return;
+                  }
+                  retry = true;
+                  break;
+                }
+              }
+              started = true;
+              if (!google) yield event;
+              else if (event.type === "done")
+                yield { ...event, message: { ...event.message, model: model.id } };
+              else if (event.type === "error") yield { ...event, error: { ...event.error, model: model.id } };
+              else yield { ...event, partial: { ...event.partial, model: model.id } };
+            }
+            if (!retry) return;
           }
         },
       }));
@@ -168,10 +333,14 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
   return { stream: wrap(streams.stream), streamSimple: wrap(streams.streamSimple) };
 }
 
-export function createCliproxyProvider(config: Config, known: readonly Model<Api>[] = builtinCatalog()) {
+export function createCliproxyProvider(
+  config: Config,
+  known: readonly Model<Api>[] = builtinCatalog(),
+  onQuotaWait?: QuotaWaitHandler,
+) {
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
-    .update(JSON.stringify([4, config]))
+    .update(JSON.stringify([4, { baseUrl: config.baseUrl, aliases: config.aliases }]))
     .digest("hex");
   const provider = createProvider<CpaApi>({
     id: PROVIDER_ID,
@@ -203,10 +372,10 @@ export function createCliproxyProvider(config: Config, known: readonly Model<Api
       return (await discover(config, context.credential.key, context.signal, known)).models;
     },
     api: {
-      "anthropic-messages": route(anthropicMessagesApi(), config.baseUrl),
-      "openai-responses": route(openAIResponsesApi(), config.baseUrl),
-      "openai-completions": route(openAICompletionsApi(), config.baseUrl),
-      "google-generative-ai": route(googleGenerativeAIApi(), config.baseUrl),
+      "anthropic-messages": route(anthropicMessagesApi(), config, onQuotaWait),
+      "openai-responses": route(openAIResponsesApi(), config, onQuotaWait),
+      "openai-completions": route(openAICompletionsApi(), config, onQuotaWait),
+      "google-generative-ai": route(googleGenerativeAIApi(), config, onQuotaWait),
     },
   });
   const refresh = provider.refreshModels;

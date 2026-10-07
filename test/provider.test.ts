@@ -18,14 +18,22 @@ import {
   hasApi,
   InMemoryCredentialStore,
   InMemoryModelsStore,
+  isRetryableAssistantError,
   type Model,
   normalizeContext,
   Type,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
+import { claudeQuotaState, fetchClaudeQuota } from "../src/claude-quota.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
-import { builtinCatalog, createCliproxyProvider, discover, nonStrictTools } from "../src/provider.ts";
+import {
+  builtinCatalog,
+  createCliproxyProvider,
+  discover,
+  nonStrictTools,
+  quotaRetryAt,
+} from "../src/provider.ts";
 
 const key = "fixture-api-key";
 const known: Model<Api>[] = [
@@ -106,9 +114,14 @@ test("configuration normalizes prefixes and rejects unsafe or invalid values", (
     { aliases: { alias: "unsupported/example" } },
     { aliases: { alias: "anthropicX" } },
     { aliases: { alias: "anthropic/" } },
+    { quota: null },
+    { quota: { waitForWeeklyReset: "true" } },
+    { quota: { unknown: true } },
   ]) {
     assert.throws(() => parseConfig(value));
   }
+  assert.equal(parseConfig({}).quota.waitForWeeklyReset, false);
+  assert.equal(parseConfig({ quota: { waitForWeeklyReset: true } }).quota.waitForWeeklyReset, true);
   assert.equal(
     parseConfig({ baseUrl: "https://old.example" }, "https://new.example").baseUrl,
     "https://new.example",
@@ -379,6 +392,10 @@ test("cache cannot cross endpoints or alias configurations", async (t) => {
   const baseUrl = await server(t, (_req, res) => res.end(JSON.stringify(catalog)));
   const first = await collection(baseUrl);
   await first.models.refresh();
+  const weekly = createCliproxyProvider(parseConfig({ baseUrl, quota: { waitForWeeklyReset: true } }), known);
+  first.models.setProvider(weekly);
+  await first.models.refresh({ allowNetwork: false });
+  assert.equal(weekly.getModels().length, 5);
   const changed = await collection(`${baseUrl}/different`, first.store);
   await changed.models.refresh({ allowNetwork: false });
   assert.equal(changed.provider.getModels().length, 0);
@@ -684,6 +701,696 @@ test("native adapters stream each family and qualified route through the right e
       }
     });
   }
+});
+
+test("quota timing requires a temporary limit and a bounded future reset", () => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  const response = (status: number, retryAfter?: string) => ({
+    status,
+    headers: new Headers(retryAfter === undefined ? {} : { "retry-after": retryAfter }),
+  });
+  const cooldown = JSON.stringify({ error: { code: "model_cooldown", reset_seconds: 3180 } });
+  assert.equal(quotaRetryAt(`429 ${cooldown}`, undefined, now), now + 3181000);
+  assert.equal(quotaRetryAt("Too many requests", response(429, "3180"), now), now + 3181000);
+  assert.equal(quotaRetryAt(cooldown, response(403), now), now + 3181000);
+  for (const type of ["rate_limit_error", "rate_limit_exceeded", "usage_limit_reached"]) {
+    assert.equal(
+      quotaRetryAt(JSON.stringify({ error: { type, reset_seconds: 3180 } }), response(429), now),
+      now + 3181000,
+    );
+  }
+  assert.equal(quotaRetryAt(cooldown, response(429, "604800"), now), now + 604801000);
+  assert.equal(quotaRetryAt(undefined, response(429, "Tue, 01 Jan 2030 00:53:00 GMT"), now), now + 3181000);
+  const skewed = response(429, "Tue, 01 Jan 2030 00:53:00 GMT");
+  skewed.headers.set("date", "Tue, 01 Jan 2030 00:00:00 GMT");
+  assert.equal(quotaRetryAt(undefined, skewed, now + 30000), now + 3211000);
+  for (const status of [200, 401, 404, 500]) {
+    assert.equal(quotaRetryAt(cooldown, response(status, "3180"), now), undefined);
+  }
+  assert.equal(quotaRetryAt("Forbidden", response(403, "3180"), now), undefined);
+  assert.equal(quotaRetryAt('{"error":{"type":"permission_error"}}', response(403, "3180"), now), undefined);
+  for (const delay of [
+    "",
+    "0",
+    "-1",
+    "1e3",
+    "Infinity",
+    "604801",
+    "9".repeat(400),
+    "Mon, 31 Dec 2029 23:00:00 GMT",
+  ]) {
+    assert.equal(quotaRetryAt("Rate limit", response(429, delay), now), undefined, delay);
+  }
+  for (const reset_seconds of [null, "3180", -1, 0, 604801, 1e100]) {
+    assert.equal(
+      quotaRetryAt(JSON.stringify({ error: { code: "model_cooldown", reset_seconds } }), undefined, now),
+      undefined,
+    );
+  }
+  for (const message of [
+    undefined,
+    "quota exceeded",
+    "{broken}",
+    cooldown.repeat(1000),
+    '{"error":{"code":"model_cooldown"}}',
+  ]) {
+    assert.equal(quotaRetryAt(message, undefined, now), undefined);
+  }
+});
+
+test("native chat adapters wait for quota reset before retrying the same request", {
+  timeout: 20000,
+}, async (t) => {
+  for (const source of [known[1], known[4], { ...known[3], id: `antigravity/${known[3].id}` }]) {
+    await t.test(source.api, async (t) => {
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2030-01-01T00:00:00Z") });
+      const waiting = Promise.withResolvers<void>();
+      const updates: (number | undefined)[] = [];
+      const bodies: string[] = [];
+      const baseUrl = await server(t, (req, res) => {
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          bodies.push(body);
+          if (bodies.length === 1) {
+            res
+              .writeHead(429, { "content-type": "application/json", "retry-after": "3180" })
+              .end(JSON.stringify({ error: { code: "model_cooldown", reset_seconds: 3180 } }));
+          } else respond(res, source.api, source.id);
+        });
+      });
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        updates.push(seconds);
+        if (seconds !== undefined) waiting.resolve();
+      });
+      const model = mapCatalog({ data: [{ id: source.id }] }, config, known).models[0];
+      assert.ok(model);
+      const stream = provider.streamSimple(
+        model,
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, timeoutMs: 500, maxTokens: 32 },
+      );
+      const events: string[] = [];
+      const completed = (async () => {
+        for await (const event of stream) events.push(event.type);
+        return stream.result();
+      })();
+      await waiting.promise;
+      assert.equal(updates[0], 3181);
+      assert.equal(events.length, 0);
+      assert.equal(bodies.length, 1);
+      t.mock.timers.tick(3180999);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(bodies.length, 1);
+      t.mock.timers.tick(1);
+      const result = await completed;
+      assert.equal(result.stopReason, "stop", result.errorMessage);
+      assert.equal(result.model, source.id);
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[0], bodies[1]);
+      assert.equal(events.filter((event) => event === "start").length, 1);
+      assert.equal(events.filter((event) => event === "done").length, 1);
+      assert.ok(!events.includes("error"));
+      assert.equal(updates.at(-1), undefined);
+    });
+  }
+});
+
+test("quota waiting is cancellable and ordinary failures keep native error behavior", {
+  timeout: 10000,
+}, async (t) => {
+  for (const fixture of [
+    {
+      status: 429,
+      headers: { "retry-after": "3180" },
+      body: { error: { type: "rate_limit_error" } },
+      waits: true,
+    },
+    {
+      status: 403,
+      headers: {},
+      body: { error: { code: "model_cooldown", reset_seconds: 3180 } },
+      waits: true,
+    },
+    {
+      status: 403,
+      headers: { "retry-after": "3180" },
+      body: { error: { type: "permission_error" } },
+      waits: false,
+    },
+    { status: 429, headers: {}, body: { error: { type: "rate_limit_error" } }, waits: false },
+    {
+      status: 500,
+      headers: { "retry-after": "3180" },
+      body: { error: { code: "model_cooldown", reset_seconds: 3180 } },
+      waits: false,
+    },
+  ]) {
+    const controller = new AbortController();
+    let requests = 0;
+    const updates: (number | undefined)[] = [];
+    const baseUrl = await server(t, (req, res) => {
+      req.resume();
+      requests++;
+      res
+        .writeHead(fixture.status, { "content-type": "application/json", ...fixture.headers })
+        .end(JSON.stringify(fixture.body));
+    });
+    const config = parseConfig({ baseUrl });
+    const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+      updates.push(seconds);
+      if (seconds !== undefined) controller.abort();
+    });
+    const model = mapCatalog(catalog, config, known).models[1];
+    const result = await provider
+      .stream(
+        model,
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, signal: controller.signal },
+      )
+      .result();
+    assert.equal(result.stopReason, fixture.waits ? "aborted" : "error", result.errorMessage);
+    assert.equal(requests, 1);
+    if (fixture.waits) {
+      assert.equal(updates[0], 3181);
+      assert.equal(updates.at(-1), undefined);
+    } else assert.deepEqual(updates, []);
+  }
+});
+
+test("quota handling does not replay a stream after it starts", async (t) => {
+  let requests = 0;
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    respond(res, "google-generative-ai");
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known, () => assert.fail("Started streams must not wait"));
+  const model = mapCatalog(catalog, config, known).models[3];
+  const stream = provider.streamSimple(
+    model,
+    normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+    {
+      apiKey: key,
+      maxRetries: 0,
+      onProviderStreamEvent() {
+        throw new Error('429 {"error":{"code":"model_cooldown","reset_seconds":3180}}');
+      },
+    },
+  );
+  const events: string[] = [];
+  for await (const event of stream) events.push(event.type);
+  assert.deepEqual(events, ["start", "error"]);
+  assert.equal((await stream.result()).stopReason, "error");
+  assert.equal(requests, 1);
+});
+
+function mockClaudeManagement(t: TestContext, baseUrl: string, usage: (account: string) => unknown) {
+  const original = globalThis.fetch;
+  const seen = {
+    calls: 0,
+    status: 200,
+    accounts: [
+      {
+        provider: "claude",
+        auth_index: "fixture-account",
+        name: "fixture.json",
+        disabled: false,
+        unavailable: true,
+      },
+    ],
+  };
+  t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : input);
+    if (!url.pathname.includes("/v0/management/")) return original(input, init);
+    assert.ok(url.href.startsWith(`${baseUrl}/v0/management/`));
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-management-key");
+    assert.equal(init?.redirect, "error");
+    assert.ok(init?.signal);
+    if (url.pathname.endsWith("/auth-files")) return Response.json({ files: seen.accounts });
+    if (url.pathname.endsWith("/auth-files/models")) return Response.json({ models: [{ id: known[0].id }] });
+    assert.ok(url.pathname.endsWith("/api-call"));
+    assert.equal(init?.method, "POST");
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.method, "GET");
+    assert.equal(body.url, "https://api.anthropic.com/api/oauth/usage");
+    assert.equal(body.header.Authorization, "Bearer $TOKEN$");
+    seen.calls++;
+    return Response.json({
+      status_code: seen.status,
+      header: { Date: [new Date(Date.now()).toUTCString()] },
+      body: JSON.stringify(usage(body.auth_index)),
+    });
+  });
+  return seen;
+}
+
+function claudeUsage(fiveReset: number, fiveUsed = 100, weekUsed = 25) {
+  return {
+    five_hour: { utilization: fiveUsed, resets_at: new Date(fiveReset).toISOString() },
+    seven_day: { utilization: weekUsed, resets_at: new Date(fiveReset + 86400000).toISOString() },
+  };
+}
+
+function claudeCooldown(res: ServerResponse) {
+  res.writeHead(429, { "content-type": "application/json" }).end(
+    JSON.stringify({
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message:
+          "All credentials for model claude-fixture are cooling down via provider claude (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again later.)",
+      },
+    }),
+  );
+}
+
+test("live Claude windows distinguish five-hour, weekly, and model-scoped exhaustion", () => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  const usage = claudeUsage(now + 900000);
+  const blocked = claudeQuotaState(usage, "claude-opus-fixture", now);
+  assert.equal(blocked.state, "blocked");
+  assert.equal(blocked.retryAt, now + 901000);
+  assert.equal(blocked.weeklyResetAt, undefined);
+  assert.equal(claudeQuotaState(claudeUsage(now + 900000, 50), "claude-opus-fixture", now).state, "ready");
+  const weekly = claudeQuotaState(claudeUsage(now + 900000, 50, 100), "claude-opus-fixture", now);
+  assert.equal(weekly.weeklyResetAt, now + 900000 + 86400000);
+  const scoped = {
+    ...usage,
+    seven_day_sonnet: { utilization: 100, resets_at: new Date(now + 2 * 86400000).toISOString() },
+  };
+  assert.equal(claudeQuotaState(scoped, "claude-opus-fixture", now).weeklyResetAt, undefined);
+  assert.equal(claudeQuotaState(scoped, "claude-sonnet-fixture", now).weeklyResetAt, now + 2 * 86400000);
+  assert.equal(claudeQuotaState(usage, "claude-opus-fixture", now + 30000, now).retryAt, now + 931000);
+  for (const payload of [
+    {},
+    { five_hour: null },
+    { ...usage, five_hour: {} },
+    { ...usage, five_hour: { utilization: "100" } },
+    claudeUsage(now - 1),
+    claudeUsage(now + 8 * 86400000),
+  ]) {
+    assert.throws(() => claudeQuotaState(payload, "claude-opus-fixture", now));
+  }
+});
+
+test("Claude waits on the first rejection and refreshes live reset changes without chat retries", {
+  timeout: 10000,
+}, async (t) => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+  let requests = 0;
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    if (requests === 1) claudeCooldown(res);
+    else respond(res, "anthropic-messages");
+  });
+  const seen = mockClaudeManagement(t, baseUrl, () =>
+    claudeUsage(now + (seen.calls === 1 ? 900000 : 90000), seen.calls < 3 ? 99 : 0),
+  );
+  const first = Promise.withResolvers<void>();
+  const refreshed = Promise.withResolvers<void>();
+  const updates: (number | undefined)[] = [];
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+    updates.push(seconds);
+    if (seconds !== undefined && seen.calls === 1) first.resolve();
+    if (seconds !== undefined && seen.calls === 2) refreshed.resolve();
+  });
+  const stream = provider.streamSimple(
+    mapCatalog(catalog, config, known).models[0],
+    normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+    {
+      apiKey: key,
+      maxRetries: 3,
+      timeoutMs: 500,
+      maxTokens: 32,
+      env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" },
+    },
+  );
+  const events: string[] = [];
+  const completed = (async () => {
+    for await (const event of stream) events.push(event.type);
+    return stream.result();
+  })();
+  await first.promise;
+  assert.equal(requests, 1);
+  assert.equal(updates[0], 901);
+  t.mock.timers.tick(60000);
+  await refreshed.promise;
+  assert.equal(requests, 1);
+  assert.equal(updates.at(-1), 31);
+  assert.equal(events.length, 0);
+  t.mock.timers.tick(30999);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(requests, 1);
+  t.mock.timers.tick(1);
+  const result = await completed;
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.equal(requests, 2);
+  assert.equal(seen.calls, 3);
+  assert.equal(events.filter((type) => type === "start").length, 1);
+  assert.ok(!events.includes("error"));
+  assert.equal(updates.at(-1), undefined);
+});
+
+test("Claude keeps configured SDK retries for non-quota failures", async (t) => {
+  let requests = 0;
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    assert.equal(new URL(req.url ?? "", "http://localhost").pathname, "/v1/messages");
+    if (requests === 1)
+      res
+        .writeHead(503, { "content-type": "application/json" })
+        .end(JSON.stringify({ error: { type: "overloaded_error", message: "Temporarily unavailable" } }));
+    else respond(res, "anthropic-messages");
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known);
+  const result = await provider
+    .streamSimple(
+      mapCatalog(catalog, config, known).models[0],
+      normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+      {
+        apiKey: key,
+        maxRetries: 1,
+        signal: AbortSignal.timeout(5000),
+        env: { CLIPROXYAPI_MANAGEMENT_KEY: "" },
+      },
+    )
+    .result();
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.equal(requests, 2);
+});
+
+test("successive live cooldowns use new reset times and cancellation stops the second wait", {
+  timeout: 15000,
+}, async (t) => {
+  for (const cancel of [false, true])
+    await t.test(String(cancel), async (t) => {
+      const now = Date.parse("2030-01-01T00:00:00Z");
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+      let requests = 0;
+      const controller = new AbortController();
+      const baseUrl = await server(t, (req, res) => {
+        req.resume();
+        requests++;
+        if (requests < 3) claudeCooldown(res);
+        else respond(res, "anthropic-messages");
+      });
+      const seen = mockClaudeManagement(t, baseUrl, () =>
+        claudeUsage(now + (requests === 1 ? 10000 : 41000), seen.calls % 2 ? 100 : 0),
+      );
+      const first = Promise.withResolvers<void>();
+      const second = Promise.withResolvers<void>();
+      const config = parseConfig({ baseUrl });
+      const updates: (number | undefined)[] = [];
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        updates.push(seconds);
+        if (seconds !== undefined && requests === 1) first.resolve();
+        if (seconds !== undefined && requests === 2) second.resolve();
+      });
+      const stream = provider.streamSimple(
+        mapCatalog(catalog, config, known).models[0],
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        {
+          apiKey: key,
+          signal: controller.signal,
+          env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" },
+        },
+      );
+      const events: string[] = [];
+      const completed = (async () => {
+        for await (const event of stream) events.push(event.type);
+        return stream.result();
+      })();
+      await first.promise;
+      assert.equal(requests, 1);
+      t.mock.timers.tick(10999);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(requests, 1);
+      t.mock.timers.tick(1);
+      await second.promise;
+      assert.equal(requests, 2);
+      assert.equal(updates.at(-1), 31);
+      assert.equal(events.length, 0);
+      if (cancel) controller.abort();
+      else {
+        t.mock.timers.tick(30999);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(requests, 2);
+        t.mock.timers.tick(1);
+      }
+      const result = await completed;
+      assert.equal(result.stopReason, cancel ? "aborted" : "stop", result.errorMessage);
+      assert.equal(requests, cancel ? 2 : 3);
+      assert.equal(events.filter((type) => type === "error").length, cancel ? 1 : 0);
+      assert.equal(updates.at(-1), undefined);
+    });
+});
+
+test("weekly policy and transient fallback keep distinct retry behavior", {
+  timeout: 20000,
+}, async (t) => {
+  for (const mode of [
+    "weekly",
+    "weekly-wait",
+    "missing-key",
+    "missing-key-header",
+    "rejected",
+    "stale",
+    "ready",
+    "ready-header",
+  ] as const)
+    await t.test(mode, async (t) => {
+      const now = Date.parse("2030-01-01T00:00:00Z");
+      t.mock.timers.enable({ apis: ["Date"], now });
+      const headerWait = mode.endsWith("-header");
+      const retryable = mode === "missing-key" || mode === "ready";
+      let requests = 0;
+      const controller = new AbortController();
+      const baseUrl = await server(t, (req, res) => {
+        req.resume();
+        requests++;
+        if (headerWait) res.setHeader("retry-after", "900");
+        claudeCooldown(res);
+      });
+      const seen = mockClaudeManagement(t, baseUrl, () =>
+        claudeUsage(
+          now + (mode === "stale" ? -1 : 900000),
+          mode.startsWith("ready") ? 0 : 100,
+          mode.startsWith("weekly") ? 100 : 25,
+        ),
+      );
+      if (mode === "rejected") seen.status = 403;
+      const config = parseConfig({ baseUrl, quota: { waitForWeeklyReset: mode === "weekly-wait" } });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        if (seconds !== undefined) {
+          assert.ok(mode === "weekly-wait" || headerWait);
+          controller.abort();
+        }
+      });
+      const result = await provider
+        .streamSimple(
+          mapCatalog(catalog, config, known).models[0],
+          normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+          {
+            apiKey: key,
+            maxRetries: 3,
+            signal: controller.signal,
+            env: {
+              CLIPROXYAPI_MANAGEMENT_KEY: mode.startsWith("missing-key") ? "" : "fixture-management-key",
+            },
+          },
+        )
+        .result();
+      assert.equal(requests, mode === "missing-key" ? 4 : 1);
+      assert.equal(result.stopReason, mode === "weekly-wait" || headerWait ? "aborted" : "error");
+      assert.equal(isRetryableAssistantError(result), retryable);
+      assert.ok(!result.errorMessage?.includes("fixture-management-key"));
+      if (mode === "weekly") {
+        assert.match(result.errorMessage ?? "", /Seven-day quota.*2030-01-02T00:15:00.000Z/);
+        assert.match(result.errorMessage ?? "", /quota.waitForWeeklyReset/);
+      }
+      if (mode.startsWith("missing-key")) assert.equal(seen.calls, 0);
+    });
+});
+
+test("weekly exhaustion discovered during a wait stops before another chat request", {
+  timeout: 10000,
+}, async (t) => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+  let requests = 0;
+  const waiting = Promise.withResolvers<void>();
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    claudeCooldown(res);
+  });
+  const seen = mockClaudeManagement(t, baseUrl, () =>
+    claudeUsage(now + 900000, 100, seen.calls === 1 ? 25 : 100),
+  );
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+    if (seconds !== undefined) waiting.resolve();
+  });
+  const stream = provider.streamSimple(
+    mapCatalog(catalog, config, known).models[0],
+    normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+    { apiKey: key, env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" } },
+  );
+  await waiting.promise;
+  t.mock.timers.tick(60000);
+  const result = await stream.result();
+  assert.equal(requests, 1);
+  assert.equal(seen.calls, 2);
+  assert.match(result.errorMessage ?? "", /Seven-day quota is exhausted/);
+  assert.equal(isRetryableAssistantError(result), false);
+});
+
+test("management quota failures reject redirects and oversized bodies without exposing upstream content", async (t) => {
+  for (const fixture of [
+    () => new Response("fixture-private-content", { status: 401 }),
+    () => new Response("fixture-private-content", { status: 503 }),
+    () =>
+      new Response("fixture-private-content", {
+        status: 302,
+        headers: { location: "https://must-not-contact.example" },
+      }),
+    () => new Response("fixture-private-content"),
+    () => new Response("x".repeat(2 * 1024 * 1024 + 1)),
+  ]) {
+    t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      assert.equal(String(input), "https://proxy.example/v0/management/auth-files");
+      assert.equal(init?.redirect, "error");
+      return fixture();
+    });
+    await assert.rejects(
+      fetchClaudeQuota(
+        parseConfig({ baseUrl: "https://proxy.example" }),
+        "fixture-management-key",
+        known[0].id,
+      ),
+      (error: unknown) =>
+        error instanceof Error &&
+        !error.message.includes("fixture-private-content") &&
+        !error.message.includes("fixture-management-key"),
+    );
+    t.mock.restoreAll();
+  }
+});
+
+test("account pools use the earliest eligible reset and do not confuse weekly-blocked accounts with available ones", async (t) => {
+  const now = Date.now();
+  const config = parseConfig({ baseUrl: "https://proxy.example/gateway" });
+  const seen = mockClaudeManagement(t, config.baseUrl, (account) =>
+    claudeUsage(now + (account === "weekly" ? 10000 : 20000), 100, account === "weekly" ? 100 : 10),
+  );
+  seen.accounts = [
+    { provider: "claude", auth_index: "weekly", name: "weekly.json", disabled: false, unavailable: true },
+    {
+      provider: "claude",
+      auth_index: "five-hour",
+      name: "five-hour.json",
+      disabled: false,
+      unavailable: true,
+    },
+  ];
+  const quota = await fetchClaudeQuota(config, "fixture-management-key", known[0].id);
+  assert.equal(quota.state, "blocked");
+  assert.equal(quota.weeklyResetAt, undefined);
+  assert.equal(seen.calls, 2);
+  assert.ok(quota.retryAt !== undefined && quota.retryAt >= now + 21000 && quota.retryAt < now + 22000);
+});
+
+test("one malformed account does not hide usable quota in the rest of the pool", async (t) => {
+  const config = parseConfig({ baseUrl: "https://proxy.example" });
+  const seen = mockClaudeManagement(t, config.baseUrl, (account) =>
+    account === "broken" ? {} : claudeUsage(Date.now() + 900000, 20),
+  );
+  seen.accounts.push({
+    provider: "claude",
+    auth_index: "broken",
+    name: "broken.json",
+    disabled: false,
+    unavailable: true,
+  });
+  const quota = await fetchClaudeQuota(config, "fixture-management-key", known[0].id);
+  assert.equal(quota.state, "ready");
+  assert.equal(seen.calls, 2);
+});
+
+test("repeated header cooldowns cannot extend the original weekly waiting deadline", {
+  timeout: 10000,
+}, async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2030-01-01T00:00:00Z") });
+  let requests = 0;
+  const waiting = Promise.withResolvers<void>();
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    res.writeHead(429, { "retry-after": "3180" }).end();
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+    if (seconds !== undefined) waiting.resolve();
+  });
+  const stream = provider.streamSimple(
+    mapCatalog(catalog, config, known).models[1],
+    normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+    { apiKey: key, maxRetries: 0 },
+  );
+  await waiting.promise;
+  t.mock.timers.tick(7 * 86400000);
+  const result = await stream.result();
+  assert.equal(requests, 2);
+  assert.match(result.errorMessage ?? "", /waiting deadline/);
+  assert.equal(isRetryableAssistantError(result), false);
+});
+
+test("late wake-ups cannot retry chat after the quota deadline even when live quota becomes ready", {
+  timeout: 15000,
+}, async (t) => {
+  for (const live of [false, true])
+    await t.test(String(live), async (t) => {
+      const now = Date.parse("2030-01-01T00:00:00Z");
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+      let requests = 0;
+      const waiting = Promise.withResolvers<void>();
+      const baseUrl = await server(t, (req, res) => {
+        req.resume();
+        requests++;
+        if (live) claudeCooldown(res);
+        else res.writeHead(429, { "retry-after": "900" }).end();
+      });
+      const seen = mockClaudeManagement(t, baseUrl, () =>
+        claudeUsage(now + 900000, seen.calls === 1 ? 100 : 0),
+      );
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        if (seconds !== undefined) waiting.resolve();
+      });
+      const stream = provider.streamSimple(
+        mapCatalog(catalog, config, known).models[live ? 0 : 1],
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" } },
+      );
+      await waiting.promise;
+      t.mock.timers.tick(7 * 86400000 + 2000);
+      const result = await stream.result();
+      assert.equal(requests, 1);
+      assert.equal(result.stopReason, "error");
+      assert.match(result.errorMessage ?? "", /waiting deadline/);
+      assert.equal(isRetryableAssistantError(result), false);
+    });
 });
 
 test("native Anthropic requests retain Antigravity high IDs and separate thinking effort", async (t) => {
