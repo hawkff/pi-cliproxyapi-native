@@ -187,6 +187,49 @@ test("aliases keep wire IDs, hidden entries disappear, and unknowns are not gues
   );
 });
 
+test("Antigravity high IDs use exact Claude metadata fallbacks without changing advertised IDs", () => {
+  const sources = builtinCatalog();
+  for (const canonical of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+    const reference = sources.find((model) => model.provider === "anthropic" && model.id === canonical);
+    assert.ok(reference);
+    const bare = `${canonical}-high`;
+    for (const id of [bare, `antigravity/${bare}`, `vertex/${bare}`]) {
+      const catalog = { data: [{ id }] };
+      const mapped = mapCatalog(catalog, parseConfig({}), sources);
+      assert.deepEqual(mapped.skipped, []);
+      assert.equal(mapped.models.length, 1);
+      const model = mapped.models[0];
+      assert.equal(model.id, id);
+      assert.equal(model.api, "anthropic-messages");
+      assert.equal(model.contextWindow, 1000000);
+      assert.equal(model.maxTokens, 128000);
+      assert.deepEqual(model.thinkingLevelMap, reference.thinkingLevelMap);
+      assert.deepEqual(model.cost, reference.cost);
+      assert.deepEqual(mapCatalog(catalog, parseConfig({}), known).skipped, [id]);
+      assert.deepEqual(mapCatalog(catalog, parseConfig({}), [reference, reference]).models, []);
+      const exact: Model<Api> = { ...reference, id: bare, contextWindow: 42 };
+      assert.equal(mapCatalog(catalog, parseConfig({}), [...sources, exact]).models[0].contextWindow, 42);
+      assert.deepEqual(
+        mapCatalog(catalog, parseConfig({}), [...sources, exact, { ...known[1], id: bare }]).models,
+        [],
+      );
+      const config = parseConfig({ aliases: { [bare]: "openai/gpt-fixture" } });
+      assert.equal(mapCatalog(catalog, config, [...sources, ...known]).models[0].api, "openai-responses");
+      assert.deepEqual(mapCatalog(catalog, config, sources).models, []);
+      const fullAlias = parseConfig({
+        aliases: { [bare]: "openai/gpt-fixture", [id]: "google/gemini-fixture" },
+      });
+      assert.equal(
+        mapCatalog(catalog, fullAlias, [...sources, ...known]).models[0].api,
+        "google-generative-ai",
+      );
+    }
+    for (const id of [`${bare}-extra`, `${canonical}-low`, `custom/${bare}`, `Antigravity/${bare}`]) {
+      assert.deepEqual(mapCatalog({ data: [{ id }] }, parseConfig({}), sources).skipped, [id]);
+    }
+  }
+});
+
 test("malformed catalogs fail rather than replacing a working list", () => {
   for (const value of [
     null,
@@ -638,6 +681,117 @@ test("native adapters stream each family and qualified route through the right e
         assert.equal(seenBody.tools[0].strict, null);
         assert.ok(!seenBody.tools[0].parameters.required?.includes("optional"));
       }
+    });
+  }
+});
+
+test("native Anthropic requests retain Antigravity high IDs and separate thinking effort", async (t) => {
+  const ids = ["claude-opus-5-5-high", "claude-sonnet-5-5-high"].flatMap((id) => [id, `antigravity/${id}`]);
+  const seen: string[] = [];
+  const baseUrl = await server(t, (req, res) => {
+    assert.equal(new URL(req.url ?? "", "http://localhost").pathname, "/v1/messages");
+    assert.equal(req.headers.authorization, `Bearer ${key}`);
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const payload = JSON.parse(body);
+      seen.push(payload.model);
+      assert.deepEqual(payload.output_config, { effort: "high" });
+      respond(res, "anthropic-messages", payload.model);
+    });
+  });
+  const config = parseConfig({ baseUrl });
+  const sources = builtinCatalog();
+  const provider = createCliproxyProvider(config, sources);
+  for (const id of ids) {
+    const model = mapCatalog({ data: [{ id }] }, config, sources).models[0];
+    assert.ok(model);
+    const result = await provider
+      .streamSimple(
+        model,
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        {
+          apiKey: key,
+          headers: { Authorization: `Bearer ${key}` },
+          reasoning: "high",
+          maxTokens: 32,
+          maxRetries: 0,
+          signal: AbortSignal.timeout(5000),
+        },
+      )
+      .result();
+    assert.equal(result.stopReason, "stop", result.errorMessage);
+    assert.equal(result.model, id);
+  }
+  assert.deepEqual(seen, ids);
+});
+
+test("native OpenAI adapters forward effective thinking-level sampling defaults and request overrides", async (t) => {
+  for (const fixture of [known[1], known[2], known[4]]) {
+    await t.test(fixture.api, async (t) => {
+      const source = {
+        ...fixture,
+        thinkingLevelMap: { off: "none", high: "high" },
+        samplingParams: { temperature: 0.7, top_p: 0.9 },
+        samplingParamsByThinkingLevel: { off: { temperature: 0.1 }, high: { temperature: 0.3 } },
+      };
+      const api = source.api === "openai-codex-responses" ? "openai-responses" : source.api;
+      const payloads: Record<string, unknown>[] = [];
+      const baseUrl = await server(t, (req, res) => {
+        assert.equal(req.url, api === "openai-responses" ? "/v1/responses" : "/v1/chat/completions");
+        assert.equal(req.headers.authorization, `Bearer ${key}`);
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          payloads.push(JSON.parse(body));
+          respond(res, api, source.id);
+        });
+      });
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, [source]);
+      const model = mapCatalog({ data: [{ id: source.id }] }, config, [source]).models[0];
+      assert.ok(model);
+      assert.deepEqual(model.samplingParamsByThinkingLevel, source.samplingParamsByThinkingLevel);
+      for (const [reasoning, temperature, expected] of [
+        [undefined, undefined, 0.1],
+        ["high", undefined, 0.3],
+        ["max", undefined, 0.3],
+        ["max", 0.2, 0.2],
+      ] as const) {
+        const result = await provider
+          .streamSimple(
+            model,
+            normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+            {
+              apiKey: key,
+              headers: { Authorization: `Bearer ${key}` },
+              reasoning,
+              samplingParams: temperature === undefined ? undefined : { temperature },
+              maxTokens: 32,
+              maxRetries: 0,
+              signal: AbortSignal.timeout(5000),
+            },
+          )
+          .result();
+        assert.equal(result.stopReason, "stop", result.errorMessage);
+        const payload = payloads.at(-1);
+        assert.ok(payload);
+        assert.equal(payload.model, source.id);
+        assert.equal(payload.temperature, expected);
+        assert.equal(payload.top_p, 0.9);
+        if (reasoning) {
+          if (api === "openai-responses")
+            assert.deepEqual(payload.reasoning, { effort: "high", summary: "auto" });
+          else assert.equal(payload.reasoning_effort, "high");
+        }
+      }
+      assert.equal(payloads.length, 4);
     });
   }
 });

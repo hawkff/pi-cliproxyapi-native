@@ -207,6 +207,8 @@ export class ModelPicker extends Container implements Focusable {
 }
 
 export function registerModelPicker(pi: ExtensionAPI, config: Config) {
+  let commandSequence = 0;
+  const savedSequence = { image: 0, video: 0 };
   pi.registerCommand("cli:model", {
     description: "Search CLIProxyAPI image/video models and select a session media default",
     getArgumentCompletions: (prefix) =>
@@ -214,6 +216,7 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     async handler(args, ctx) {
+      const sequence = ++commandSequence;
       const report = (content: string, error = false) => {
         if (ctx.hasUI) ctx.ui.notify(content, error ? "error" : "info");
         else if (ctx.mode === "print") console.error(content);
@@ -227,16 +230,22 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         const input = args.trim();
         const clear = input === "clear image" ? "image" : input === "clear video" ? "video" : undefined;
         const save = (choice: string) => {
-          const defaults = readMediaDefaults(config, ctx);
-          if (choice === "clear image") delete defaults.image;
-          else if (choice === "clear video") delete defaults.video;
-          else {
-            const capability = mediaCapability(choice);
-            if (!capability || capability.disabledReason)
-              throw new Error("Unsupported CLIProxyAPI media selection.");
-            defaults[capability.purpose] = choice;
+          const clearing =
+            choice === "clear image" ? "image" : choice === "clear video" ? "video" : undefined;
+          const capability = clearing ? undefined : mediaCapability(choice);
+          const purpose = clearing ?? capability?.purpose;
+          if (!purpose || capability?.disabledReason)
+            throw new Error("Unsupported CLIProxyAPI media selection.");
+          ctx.signal?.throwIfAborted();
+          if (sequence < savedSequence[purpose]) {
+            report(`CLIProxyAPI ${purpose} choice superseded by a newer command; no change saved.`);
+            return;
           }
+          const defaults = readMediaDefaults(config, ctx);
+          if (clearing) delete defaults[purpose];
+          else defaults[purpose] = choice;
           pi.appendEntry(MEDIA_DEFAULTS_ENTRY, { version: 1, endpoint: config.baseUrl, defaults });
+          savedSequence[purpose] = sequence;
           const effective = effectiveMediaDefaults(config, ctx);
           report(defaultsLabel(effective.defaults, effective.automatic));
         };

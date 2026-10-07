@@ -6,7 +6,7 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-This release targets Pi 1.0.0 and CLIProxyAPI 8.0.7, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+This release targets Pi 1.0.4 and CLIProxyAPI 8.0.18, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
@@ -194,6 +194,8 @@ Replace `<canonical-model-id>` with an ID from Pi's Anthropic catalog. Reference
 
 A `vertex/` or `antigravity/` route can reuse its unprefixed ID's alias if that reference resolves to one metadata entry. An alias for the full prefixed ID takes precedence. Custom prefixes need an explicit chat alias. Arbitrary aliases may lack ID-specific adapter behavior; canonical Gemini IDs and the two recognized prefixes retain native thinking and tool-turn handling.
 
+For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and recognized `antigravity/` or `vertex/` routes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi; requests keep the advertised `-high` ID.
+
 Use Pi's `models.json` `modelOverrides` for limits, prices, or compatibility changes. Use its `models` array for IDs with no built-in metadata. Updating Pi supplies newer metadata. Catalog prices are estimates, not the proxy's bill; check upstream limits before increasing them.
 
 ## Backend routes
@@ -212,6 +214,8 @@ Set the CLIProxyAPI auth record's top-level `prefix` to `vertex` or `antigravity
 ## Thinking and child sessions
 
 Use a reference such as `cliproxyapi/<model-id>:high` in Pi or pi-subagents. Pi separates the thinking suffix from the request ID. Supported levels come from model metadata; `xhigh` and `max` require explicit support. Pi clamps unsupported levels, and models that require thinking cannot use `off`. Keep thinking suffixes out of alias references.
+
+The `-high` in Antigravity model IDs belongs to the request ID. Pi's `:high` suffix sets thinking effort. For example, `cliproxyapi/antigravity/claude-opus-5-5-high:high` sends `antigravity/claude-opus-5-5-high` with high effort.
 
 Child loading depends on the [pi-subagents extension settings](https://github.com/nicobailon/pi-subagents/blob/main/docs/agents.md#tool-and-extension-selection). Local foreground children can inherit providers from the parent. Background children load extensions through discovery or an allowlist. A saved catalog alone does not register this provider.
 

@@ -171,6 +171,11 @@ const owners: Readonly<Record<string, string>> = {
   "gemini-cli": "google",
 };
 
+const metadataFallbacks = new Map([
+  ["claude-opus-5-5-high", "anthropic/claude-opus-5-5"],
+  ["claude-sonnet-5-5-high", "anthropic/claude-sonnet-5-5"],
+]);
+
 export function mapCatalog(value: unknown, config: Config, known: readonly Model<Api>[]) {
   const models = new Map<string, Model<CpaApi>>();
   const skipped = new Set<string>();
@@ -186,11 +191,16 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       : backend && Object.hasOwn(config.aliases, metadataId)
         ? config.aliases[metadataId]
         : undefined;
-    const candidates = known.filter((model) =>
+    let candidates = known.filter((model) =>
       alias
         ? `${model.provider}/${model.id}` === alias
         : (!entry.id.includes("/") || backend) && model.id === metadataId,
     );
+    const fallback = metadataFallbacks.get(metadataId);
+    if (!alias && candidates.length === 0 && fallback && (!entry.id.includes("/") || backend)) {
+      candidates = known.filter((model) => `${model.provider}/${model.id}` === fallback);
+      if (candidates.length !== 1) candidates = [];
+    }
     const families = new Set(
       candidates.map((model) => (model.provider === "openai-codex" ? "openai" : model.provider)),
     );
