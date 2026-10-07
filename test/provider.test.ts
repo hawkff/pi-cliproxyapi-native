@@ -23,7 +23,7 @@ import {
   Type,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
-import { mapCatalog, parseCatalog } from "../src/catalog.ts";
+import { mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
 import { builtinCatalog, createCliproxyProvider, discover, nonStrictTools } from "../src/provider.ts";
 
@@ -200,6 +200,7 @@ test("Antigravity high IDs use exact Claude metadata fallbacks without changing 
       assert.equal(mapped.models.length, 1);
       const model = mapped.models[0];
       assert.equal(model.id, id);
+      assert.equal(model.name, routedName(id, `${id} (${reference.name})`));
       assert.equal(model.api, "anthropic-messages");
       assert.equal(model.contextWindow, 1000000);
       assert.equal(model.maxTokens, 128000);

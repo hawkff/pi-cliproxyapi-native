@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
 import { type Config, isRecord, PROVIDER_ID } from "./config.ts";
 import { type DefaultsContext, effectiveMediaDefaults, resolveMediaModel } from "./media-defaults.ts";
-import { fetchCatalog, validateKey } from "./provider.ts";
+import { deadline, fetchCatalog, validateKey } from "./provider.ts";
 
 type MediaContext = Pick<ExtensionContext, "cwd" | "model"> &
   DefaultsContext & {
@@ -100,10 +100,6 @@ function mediaOutputOptions(
     );
   }
   return options;
-}
-
-function deadline(signal: AbortSignal | undefined, milliseconds: number) {
-  return AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(milliseconds)]);
 }
 
 export async function mediaKey(ctx: Pick<MediaContext, "modelRegistry">, signal: AbortSignal) {

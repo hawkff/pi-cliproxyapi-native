@@ -194,7 +194,7 @@ Replace `<canonical-model-id>` with an ID from Pi's Anthropic catalog. Reference
 
 A `vertex/` or `antigravity/` route can reuse its unprefixed ID's alias if that reference resolves to one metadata entry. An alias for the full prefixed ID takes precedence. Custom prefixes need an explicit chat alias. Arbitrary aliases may lack ID-specific adapter behavior; canonical Gemini IDs and the two recognized prefixes retain native thinking and tool-turn handling.
 
-For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and recognized `antigravity/` or `vertex/` routes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi; requests keep the advertised `-high` ID.
+For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and recognized `antigravity/` or `vertex/` routes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi and names the model like a configured alias, for example `claude-opus-5-5-high (Claude Opus 5.5)`; requests keep the advertised `-high` ID.
 
 Use Pi's `models.json` `modelOverrides` for limits, prices, or compatibility changes. Use its `models` array for IDs with no built-in metadata. Updating Pi supplies newer metadata. Catalog prices are estimates, not the proxy's bill; check upstream limits before increasing them.
 
