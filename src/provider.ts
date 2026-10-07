@@ -36,9 +36,13 @@ export function validateKey(key: string) {
   return key;
 }
 
+export function deadline(signal: AbortSignal | undefined, milliseconds: number) {
+  return AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(milliseconds)]);
+}
+
 export async function fetchCatalog(config: Config, key: string, signal: AbortSignal) {
   validateKey(key);
-  const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(10000)]);
+  const boundedSignal = deadline(signal, 10000);
   let response: Response;
   try {
     response = await fetch(`${config.baseUrl}/v1/models`, {

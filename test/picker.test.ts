@@ -440,6 +440,141 @@ test("media selection uses only GETs, restores branch defaults, and never change
   assert.equal(footerWrites, 0);
 });
 
+test("picker saves follow successful command order per purpose across deferred discovery", async (t) => {
+  const otherImage = "gemini-2.5-flash-image";
+  const cases = [
+    {
+      name: "later clear supersedes pending selection",
+      later: "clear image",
+      expected: {},
+      superseded: true,
+    },
+    {
+      name: "later selection completes first",
+      later: `select ${otherImage}`,
+      expected: { image: otherImage },
+      superseded: true,
+    },
+    {
+      name: "older selection completes first",
+      later: `select ${otherImage}`,
+      olderFirst: true,
+      expected: { image: otherImage },
+    },
+    { name: "independent video completes first", later: `select ${video}`, expected: { image, video } },
+    {
+      name: "independent image completes first",
+      later: `select ${video}`,
+      olderFirst: true,
+      expected: { image, video },
+    },
+    { name: "later list does not supersede selection", later: "list", expected: { image } },
+    { name: "aborted pending selection does not save", later: "list", abort: true, expected: {} },
+    {
+      name: "later failed request does not supersede selection",
+      later: `select ${otherImage}`,
+      failure: true,
+      expected: { image },
+    },
+    { name: "later cancelled picker does not supersede selection", later: "", expected: { image } },
+    {
+      name: "later unsupported selection does not supersede selection",
+      later: "select unknown-image",
+      expected: { image },
+    },
+    {
+      name: "later disabled selection does not supersede selection",
+      later: "select imagen-4.0-generate-001",
+      immediate: true,
+      expected: { image },
+    },
+    {
+      name: "older picker clear cannot overwrite a later selection",
+      olderClear: true,
+      later: `select ${otherImage}`,
+      expected: { image: otherImage },
+      superseded: true,
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (t) => {
+      const config = parseConfig({});
+      const sessionManager = SessionManager.inMemory();
+      const notifications: string[] = [];
+      const gates = [0, 1].map(() => ({
+        started: Promise.withResolvers<void>(),
+        response: Promise.withResolvers<Response>(),
+      }));
+      let requests = 0;
+      t.mock.method(globalThis, "fetch", (_url: string, init?: RequestInit) => {
+        assert.equal(init?.method, undefined);
+        const gate = gates[requests++];
+        assert.ok(gate);
+        gate.started.resolve();
+        return gate.response.promise;
+      });
+      let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+      const pi = {
+        registerCommand(_name, options) {
+          command = options;
+        },
+        appendEntry(type, data) {
+          sessionManager.appendCustomEntry(type, data);
+        },
+      } as ExtensionAPI;
+      const controller = new AbortController();
+      const ctx = {
+        mode: "rpc",
+        hasUI: true,
+        sessionManager,
+        signal: controller.signal,
+        ui: { notify: (text: string) => notifications.push(text), custom: async () => undefined },
+        modelRegistry: { getProviderAuth: async () => ({ auth: { apiKey: "fixture" } }) },
+      } as unknown as ExtensionCommandContext;
+      registerModelPicker(pi, config);
+      assert.ok(command);
+      const older = command.handler(
+        scenario.olderClear ? "" : `select ${image}`,
+        scenario.olderClear
+          ? {
+              ...ctx,
+              mode: "tui",
+              ui: { ...ctx.ui, custom: async () => "clear image" } as ExtensionContext["ui"],
+            }
+          : ctx,
+      );
+      await gates[0].started.promise;
+      const later = command.handler(scenario.later, { ...ctx, mode: scenario.later === "" ? "tui" : "rpc" });
+      const immediate = scenario.later.startsWith("clear ") || scenario.immediate;
+      if (!immediate) await gates[1].started.promise;
+      const response = () => Response.json({ data: [...catalog.data, { id: otherImage }] });
+      if (scenario.olderFirst) {
+        gates[0].response.resolve(response());
+        await older;
+        assert.deepEqual(readMediaDefaults(config, ctx), { image });
+      }
+      if (!immediate)
+        gates[1].response.resolve(scenario.failure ? new Response("failed", { status: 503 }) : response());
+      await later;
+      if (!scenario.olderFirst) {
+        if (scenario.abort) controller.abort();
+        gates[0].response.resolve(response());
+        await older;
+      }
+      assert.deepEqual(readMediaDefaults(config, ctx), scenario.expected);
+      assert.equal(
+        notifications.some((text) => text.includes("superseded")),
+        !!scenario.superseded,
+      );
+      if (scenario.superseded) {
+        assert.match(notifications.at(-1) ?? "", /no change saved/);
+        assert.equal(sessionManager.getBranch().length, 1);
+      }
+      assert.equal(requests, immediate ? 1 : 2);
+    });
+  }
+});
+
 test("Pi loads and dispatches the colon command in RPC, print and JSON without inference or generation", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "pi-cliproxyapi-picker-test-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));

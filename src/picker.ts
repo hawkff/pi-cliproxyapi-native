@@ -16,7 +16,7 @@ import {
   type MediaDefaults,
   readMediaDefaults,
 } from "./media-defaults.ts";
-import { fetchCatalog } from "./provider.ts";
+import { deadline, fetchCatalog } from "./provider.ts";
 
 export function pickerCatalog(value: unknown) {
   const rows = new Map<
@@ -56,6 +56,10 @@ export function searchPickerItems(items: readonly PickerItem[], query: string) {
   return items.filter((item) =>
     terms.every((term) => `${item.label} ${item.value} ${item.description}`.toLowerCase().includes(term)),
   );
+}
+
+function clearedPurpose(choice: string) {
+  return choice === "clear image" ? "image" : choice === "clear video" ? "video" : undefined;
 }
 
 function defaultsLabel(defaults: MediaDefaults, automatic?: string) {
@@ -207,6 +211,8 @@ export class ModelPicker extends Container implements Focusable {
 }
 
 export function registerModelPicker(pi: ExtensionAPI, config: Config) {
+  let commandSequence = 0;
+  const savedSequence = { image: 0, video: 0 };
   pi.registerCommand("cli:model", {
     description: "Search CLIProxyAPI image/video models and select a session media default",
     getArgumentCompletions: (prefix) =>
@@ -214,6 +220,7 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value })),
     async handler(args, ctx) {
+      const sequence = ++commandSequence;
       const report = (content: string, error = false) => {
         if (ctx.hasUI) ctx.ui.notify(content, error ? "error" : "info");
         else if (ctx.mode === "print") console.error(content);
@@ -225,39 +232,41 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
       };
       try {
         const input = args.trim();
-        const clear = input === "clear image" ? "image" : input === "clear video" ? "video" : undefined;
         const save = (choice: string) => {
-          const defaults = readMediaDefaults(config, ctx);
-          if (choice === "clear image") delete defaults.image;
-          else if (choice === "clear video") delete defaults.video;
-          else {
-            const capability = mediaCapability(choice);
-            if (!capability || capability.disabledReason)
-              throw new Error("Unsupported CLIProxyAPI media selection.");
-            defaults[capability.purpose] = choice;
+          const clearing = clearedPurpose(choice);
+          const capability = clearing ? undefined : mediaCapability(choice);
+          const purpose = clearing ?? capability?.purpose;
+          if (!purpose || capability?.disabledReason)
+            throw new Error("Unsupported CLIProxyAPI media selection.");
+          ctx.signal?.throwIfAborted();
+          if (sequence < savedSequence[purpose]) {
+            report(`CLIProxyAPI ${purpose} choice superseded by a newer command; no change saved.`);
+            return;
           }
+          const defaults = readMediaDefaults(config, ctx);
+          if (clearing) delete defaults[purpose];
+          else defaults[purpose] = choice;
           pi.appendEntry(MEDIA_DEFAULTS_ENTRY, { version: 1, endpoint: config.baseUrl, defaults });
+          savedSequence[purpose] = sequence;
           const effective = effectiveMediaDefaults(config, ctx);
           report(defaultsLabel(effective.defaults, effective.automatic));
         };
-        if (clear) {
-          save(`clear ${clear}`);
+        if (clearedPurpose(input)) {
+          save(input);
           return;
         }
         if (input.startsWith("clear")) throw new Error("Usage: /cli:model clear image|video");
-        const disabledReason = input.startsWith("select ")
-          ? mediaCapability(input.slice(7).trim())?.disabledReason
-          : undefined;
+        const explicit = input.startsWith("select ") ? input.slice(7).trim() : undefined;
+        const disabledReason = explicit === undefined ? undefined : mediaCapability(explicit)?.disabledReason;
         if (disabledReason) {
           report(disabledReason, true);
           return;
         }
-        const signal = AbortSignal.any([...(ctx.signal ? [ctx.signal] : []), AbortSignal.timeout(15000)]);
+        const signal = deadline(ctx.signal, 15000);
         const key = await mediaKey(ctx, signal);
         const rows = pickerCatalog(await fetchCatalog(config, key, signal));
         const { defaults, automatic } = effectiveMediaDefaults(config, ctx);
         const items = pickerItems(rows, defaults);
-        const explicit = input.startsWith("select ") ? input.slice(7).trim() : undefined;
         const query = input === "list" ? "" : input.startsWith("search ") ? input.slice(7) : input;
         let choice = explicit;
         if (choice === undefined) {
@@ -291,14 +300,9 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
           }
         }
         if (choice === undefined) return;
-        if (choice === "clear image" || choice === "clear video") {
-          save(choice);
-          return;
-        }
-        const row = rows.find((row) => row.id === choice);
-        if (!row?.supported)
+        if (!clearedPurpose(choice) && !rows.find((row) => row.id === choice)?.supported)
           throw new Error("Model unavailable or unsupported. Use /cli:model to list supported IDs.");
-        save(row.id);
+        save(choice);
       } catch {
         report(
           "CLIProxyAPI model selection failed: unavailable/unsupported model, invalid command, authentication, or connection error. Check /login cliproxyapi. Use /cli:model list, select <exact ID>, or clear image|video.",
