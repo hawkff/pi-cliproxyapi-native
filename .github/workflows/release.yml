@@ -1,0 +1,50 @@
+# Publishes a tagged version to npm through trusted publishing (OIDC). npm attaches provenance.
+#
+# One-time setup on npmjs.com under the package's Settings, Trusted Publisher, GitHub Actions:
+# user hawkff, repository pi-cliproxyapi-native, workflow filename release.yml, no environment,
+# with "Allow npm publish" ticked. The configuration expires unless a publish succeeds within
+# two days, so create it right before a release. Once a publish has succeeded, set Publishing
+# access to "Require two-factor authentication and disallow tokens".
+#
+# Release: merge the version bump into main, then
+#   gh release create vX.Y.Z --target main --title "Pi CLIProxyAPI Native vX.Y.Z" --notes-file notes.md
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # Tests and dependencies run here, without access to the OIDC token.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 12.3.4
+      - run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm check
+  publish:
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: npm publish --ignore-scripts
