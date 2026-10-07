@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   type Api,
   createProvider,
@@ -106,7 +107,63 @@ export function nonStrictTools(payload: unknown) {
   };
 }
 
-function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
+export type QuotaWaitHandler = (id: symbol, remainingSeconds: number | undefined) => void;
+
+export function quotaRetryAt(
+  message: string | undefined,
+  response?: Pick<Response, "status" | "headers">,
+  now = Date.now(),
+) {
+  let error: unknown;
+  if (message && message.length <= 65536) {
+    try {
+      const body: unknown = JSON.parse(message.slice(message.indexOf("{"), message.lastIndexOf("}") + 1));
+      error = isRecord(body) && isRecord(body.error) ? body.error : body;
+    } catch {
+      // SDK messages without a JSON body can still carry Retry-After headers.
+    }
+  }
+  const code = isRecord(error) ? (error.code ?? error.type) : undefined;
+  const quota = ["model_cooldown", "rate_limit_error", "rate_limit_exceeded", "usage_limit_reached"].includes(
+    typeof code === "string" ? code : "",
+  );
+  if (response) {
+    if (response.status !== 429 && !(response.status === 403 && quota)) return undefined;
+  } else if (code !== "model_cooldown") return undefined;
+
+  const resets: number[] = [];
+  const retryAfter = response?.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const serverDate = Date.parse(response?.headers.get("date") ?? "");
+    resets.push(
+      /^\d+$/.test(retryAfter)
+        ? now + Number(retryAfter) * 1000
+        : now + Date.parse(retryAfter) - (Number.isFinite(serverDate) ? serverDate : now),
+    );
+  }
+  if (quota && isRecord(error) && typeof error.reset_seconds === "number") {
+    resets.push(now + error.reset_seconds * 1000);
+  }
+  // Support five-hour and weekly windows without trusting unbounded server delays.
+  const valid = resets.filter((at) => Number.isSafeInteger(at) && at > now && at - now <= 7 * 86400000);
+  return valid.length ? Math.max(...valid) + 1000 : undefined;
+}
+
+async function waitForQuota(resetAt: number, signal?: AbortSignal, onWait?: QuotaWaitHandler) {
+  const id = Symbol();
+  try {
+    for (let remaining = resetAt - Date.now(); remaining > 0; remaining = resetAt - Date.now()) {
+      signal?.throwIfAborted();
+      onWait?.(id, Math.ceil(remaining / 1000));
+      await sleep(Math.min(remaining, 1000), undefined, { signal });
+    }
+    signal?.throwIfAborted();
+  } finally {
+    onWait?.(id, undefined);
+  }
+}
+
+function route(streams: ProviderStreams, baseUrl: string, onWait?: QuotaWaitHandler): ProviderStreams {
   const wrap =
     (stream: ProviderStreams["streamSimple"]): ProviderStreams["streamSimple"] =>
     (selected, context, options) => {
@@ -145,22 +202,65 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
         const result = await options?.onPayload?.(adapted, model);
         return result === undefined ? adapted : result;
       };
+      let response: Pick<Response, "status" | "headers"> | undefined;
       const run = () =>
         stream(adapterModel, adapterContext, {
           ...options,
+          // Google rejects custom fetch; its structured cooldown body remains available on errors.
+          fetch:
+            model.api === "google-generative-ai"
+              ? options?.fetch
+              : async (input, init) => {
+                  response = undefined;
+                  const result = await (options?.fetch ?? globalThis.fetch)(input, init);
+                  response = { status: result.status, headers: result.headers };
+                  return result;
+                },
           onPayload,
           onResponse: options?.onResponse ? (response) => options.onResponse?.(response, model) : undefined,
           onProviderStreamEvent: options?.onProviderStreamEvent
             ? (event) => options.onProviderStreamEvent?.(event, model)
             : undefined,
         });
-      if (!google) return run();
       return lazyStream(model, async () => ({
         async *[Symbol.asyncIterator]() {
-          for await (const event of run()) {
-            if (event.type === "done") yield { ...event, message: { ...event.message, model: model.id } };
-            else if (event.type === "error") yield { ...event, error: { ...event.error, model: model.id } };
-            else yield { ...event, partial: { ...event.partial, model: model.id } };
+          for (;;) {
+            response = undefined;
+            let started = false;
+            let retry = false;
+            for await (const event of run()) {
+              if (event.type === "error" && event.reason === "error" && !started) {
+                const resetAt = quotaRetryAt(event.error.errorMessage, response);
+                if (resetAt && !options?.signal?.aborted) {
+                  try {
+                    // Sleep outside the adapter so its HTTP timeout does not cut the quota wait short.
+                    await waitForQuota(resetAt, options?.signal, onWait);
+                  } catch (error) {
+                    if (!options?.signal?.aborted) throw error;
+                    yield {
+                      type: "error" as const,
+                      reason: "aborted" as const,
+                      error: {
+                        ...event.error,
+                        model: model.id,
+                        stopReason: "aborted" as const,
+                        errorMessage: "Request was aborted during the quota wait.",
+                      },
+                    };
+                    return;
+                  }
+                  retry = true;
+                  break;
+                }
+              }
+              started = true;
+              if (!google) yield event;
+              else if (event.type === "done")
+                yield { ...event, message: { ...event.message, model: model.id } };
+              else if (event.type === "error") yield { ...event, error: { ...event.error, model: model.id } };
+              else yield { ...event, partial: { ...event.partial, model: model.id } };
+            }
+            if (!retry) return;
           }
         },
       }));
@@ -168,7 +268,11 @@ function route(streams: ProviderStreams, baseUrl: string): ProviderStreams {
   return { stream: wrap(streams.stream), streamSimple: wrap(streams.streamSimple) };
 }
 
-export function createCliproxyProvider(config: Config, known: readonly Model<Api>[] = builtinCatalog()) {
+export function createCliproxyProvider(
+  config: Config,
+  known: readonly Model<Api>[] = builtinCatalog(),
+  onQuotaWait?: QuotaWaitHandler,
+) {
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
     .update(JSON.stringify([4, config]))
@@ -203,10 +307,10 @@ export function createCliproxyProvider(config: Config, known: readonly Model<Api
       return (await discover(config, context.credential.key, context.signal, known)).models;
     },
     api: {
-      "anthropic-messages": route(anthropicMessagesApi(), config.baseUrl),
-      "openai-responses": route(openAIResponsesApi(), config.baseUrl),
-      "openai-completions": route(openAICompletionsApi(), config.baseUrl),
-      "google-generative-ai": route(googleGenerativeAIApi(), config.baseUrl),
+      "anthropic-messages": route(anthropicMessagesApi(), config.baseUrl, onQuotaWait),
+      "openai-responses": route(openAIResponsesApi(), config.baseUrl, onQuotaWait),
+      "openai-completions": route(openAICompletionsApi(), config.baseUrl, onQuotaWait),
+      "google-generative-ai": route(googleGenerativeAIApi(), config.baseUrl, onQuotaWait),
     },
   });
   const refresh = provider.refreshModels;

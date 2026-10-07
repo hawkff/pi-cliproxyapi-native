@@ -25,7 +25,13 @@ import {
 import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
-import { builtinCatalog, createCliproxyProvider, discover, nonStrictTools } from "../src/provider.ts";
+import {
+  builtinCatalog,
+  createCliproxyProvider,
+  discover,
+  nonStrictTools,
+  quotaRetryAt,
+} from "../src/provider.ts";
 
 const key = "fixture-api-key";
 const known: Model<Api>[] = [
@@ -684,6 +690,207 @@ test("native adapters stream each family and qualified route through the right e
       }
     });
   }
+});
+
+test("quota timing requires a temporary limit and a bounded future reset", () => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  const response = (status: number, retryAfter?: string) => ({
+    status,
+    headers: new Headers(retryAfter === undefined ? {} : { "retry-after": retryAfter }),
+  });
+  const cooldown = JSON.stringify({ error: { code: "model_cooldown", reset_seconds: 3180 } });
+  assert.equal(quotaRetryAt(`429 ${cooldown}`, undefined, now), now + 3181000);
+  assert.equal(quotaRetryAt("Too many requests", response(429, "3180"), now), now + 3181000);
+  assert.equal(quotaRetryAt(cooldown, response(403), now), now + 3181000);
+  assert.equal(quotaRetryAt(cooldown, response(429, "604800"), now), now + 604801000);
+  assert.equal(quotaRetryAt(undefined, response(429, "Tue, 01 Jan 2030 00:53:00 GMT"), now), now + 3181000);
+  const skewed = response(429, "Tue, 01 Jan 2030 00:53:00 GMT");
+  skewed.headers.set("date", "Tue, 01 Jan 2030 00:00:00 GMT");
+  assert.equal(quotaRetryAt(undefined, skewed, now + 30000), now + 3211000);
+  for (const status of [200, 401, 404, 500]) {
+    assert.equal(quotaRetryAt(cooldown, response(status, "3180"), now), undefined);
+  }
+  assert.equal(quotaRetryAt("Forbidden", response(403, "3180"), now), undefined);
+  assert.equal(quotaRetryAt('{"error":{"type":"permission_error"}}', response(403, "3180"), now), undefined);
+  for (const delay of [
+    "",
+    "0",
+    "-1",
+    "1e3",
+    "Infinity",
+    "604801",
+    "9".repeat(400),
+    "Mon, 31 Dec 2029 23:00:00 GMT",
+  ]) {
+    assert.equal(quotaRetryAt("Rate limit", response(429, delay), now), undefined, delay);
+  }
+  for (const reset_seconds of [null, "3180", -1, 0, 604801, 1e100]) {
+    assert.equal(
+      quotaRetryAt(JSON.stringify({ error: { code: "model_cooldown", reset_seconds } }), undefined, now),
+      undefined,
+    );
+  }
+  for (const message of [
+    undefined,
+    "quota exceeded",
+    "{broken}",
+    cooldown.repeat(1000),
+    '{"error":{"code":"model_cooldown"}}',
+  ]) {
+    assert.equal(quotaRetryAt(message, undefined, now), undefined);
+  }
+});
+
+test("native chat adapters wait for quota reset before retrying the same request", {
+  timeout: 20000,
+}, async (t) => {
+  for (const source of [known[0], known[1], known[4], { ...known[3], id: `antigravity/${known[3].id}` }]) {
+    await t.test(source.api, async (t) => {
+      t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2030-01-01T00:00:00Z") });
+      const waiting = Promise.withResolvers<void>();
+      const updates: (number | undefined)[] = [];
+      const bodies: string[] = [];
+      const baseUrl = await server(t, (req, res) => {
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          bodies.push(body);
+          if (bodies.length === 1) {
+            res
+              .writeHead(429, { "content-type": "application/json", "retry-after": "3180" })
+              .end(JSON.stringify({ error: { code: "model_cooldown", reset_seconds: 3180 } }));
+          } else respond(res, source.api, source.id);
+        });
+      });
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        updates.push(seconds);
+        if (seconds !== undefined) waiting.resolve();
+      });
+      const model = mapCatalog({ data: [{ id: source.id }] }, config, known).models[0];
+      assert.ok(model);
+      const stream = provider.streamSimple(
+        model,
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, timeoutMs: 500, maxTokens: 32 },
+      );
+      const events: string[] = [];
+      const completed = (async () => {
+        for await (const event of stream) events.push(event.type);
+        return stream.result();
+      })();
+      await waiting.promise;
+      assert.equal(updates[0], 3181);
+      assert.equal(events.length, 0);
+      assert.equal(bodies.length, 1);
+      t.mock.timers.tick(3180999);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(bodies.length, 1);
+      t.mock.timers.tick(1);
+      const result = await completed;
+      assert.equal(result.stopReason, "stop", result.errorMessage);
+      assert.equal(result.model, source.id);
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[0], bodies[1]);
+      assert.equal(events.filter((event) => event === "start").length, 1);
+      assert.equal(events.filter((event) => event === "done").length, 1);
+      assert.ok(!events.includes("error"));
+      assert.equal(updates.at(-1), undefined);
+    });
+  }
+});
+
+test("quota waiting is cancellable and ordinary failures keep native error behavior", {
+  timeout: 10000,
+}, async (t) => {
+  for (const fixture of [
+    {
+      status: 429,
+      headers: { "retry-after": "3180" },
+      body: { error: { type: "rate_limit_error" } },
+      waits: true,
+    },
+    {
+      status: 403,
+      headers: {},
+      body: { error: { code: "model_cooldown", reset_seconds: 3180 } },
+      waits: true,
+    },
+    {
+      status: 403,
+      headers: { "retry-after": "3180" },
+      body: { error: { type: "permission_error" } },
+      waits: false,
+    },
+    { status: 429, headers: {}, body: { error: { type: "rate_limit_error" } }, waits: false },
+    {
+      status: 500,
+      headers: { "retry-after": "3180" },
+      body: { error: { code: "model_cooldown", reset_seconds: 3180 } },
+      waits: false,
+    },
+  ]) {
+    const controller = new AbortController();
+    let requests = 0;
+    const updates: (number | undefined)[] = [];
+    const baseUrl = await server(t, (req, res) => {
+      req.resume();
+      requests++;
+      res
+        .writeHead(fixture.status, { "content-type": "application/json", ...fixture.headers })
+        .end(JSON.stringify(fixture.body));
+    });
+    const config = parseConfig({ baseUrl });
+    const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+      updates.push(seconds);
+      if (seconds !== undefined) controller.abort();
+    });
+    const model = mapCatalog(catalog, config, known).models[0];
+    const result = await provider
+      .stream(
+        model,
+        normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+        { apiKey: key, maxRetries: 0, signal: controller.signal },
+      )
+      .result();
+    assert.equal(result.stopReason, fixture.waits ? "aborted" : "error", result.errorMessage);
+    assert.equal(requests, 1);
+    if (fixture.waits) {
+      assert.equal(updates[0], 3181);
+      assert.equal(updates.at(-1), undefined);
+    } else assert.deepEqual(updates, []);
+  }
+});
+
+test("quota handling does not replay a stream after it starts", async (t) => {
+  let requests = 0;
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    respond(res, "google-generative-ai");
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known, () => assert.fail("Started streams must not wait"));
+  const model = mapCatalog(catalog, config, known).models[3];
+  const stream = provider.streamSimple(
+    model,
+    normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+    {
+      apiKey: key,
+      maxRetries: 0,
+      onProviderStreamEvent() {
+        throw new Error('429 {"error":{"code":"model_cooldown","reset_seconds":3180}}');
+      },
+    },
+  );
+  const events: string[] = [];
+  for await (const event of stream) events.push(event.type);
+  assert.deepEqual(events, ["start", "error"]);
+  assert.equal((await stream.result()).stopReason, "error");
+  assert.equal(requests, 1);
 });
 
 test("native Anthropic requests retain Antigravity high IDs and separate thinking effort", async (t) => {

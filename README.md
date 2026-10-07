@@ -176,6 +176,16 @@ The extension discovers available IDs through `/v1/models` and matches them agai
 
 Run `/cliproxyapi-refresh` to update the chat catalog.
 
+### Wait for quota reset
+
+Chat requests wait for a reported quota reset, then retry the same turn. These waits do not consume Pi's agent-level retry attempts. The terminal shows a countdown; cancel the current request to stop waiting. Keep Pi running, since closing or reloading the session discards the wait.
+
+The extension accepts `Retry-After` on HTTP 429 responses and on HTTP 403 responses with a recognized quota error. It also accepts `reset_seconds` in CLIProxyAPI's `model_cooldown` errors. Google's native adapter exposes only the structured error body, so Google routes need `model_cooldown` and `reset_seconds`.
+
+Reset times must be in the future and no more than seven days away. The extension adds a one-second buffer and honors further cooldown responses after retrying. It does not assume a five-hour reset will clear a weekly limit. The extension leaves errors without valid reset timing to Pi and does not replay requests that have started streaming.
+
+This uses failed chat responses, without management credentials or quota polling. Image and video generation still do not retry.
+
 ### Aliases and model limits
 
 The chat catalog skips unknown IDs rather than guessing their capabilities. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out.
