@@ -41,6 +41,7 @@ test("npm package contains only release files and loads without checkout depende
       "package.json",
       "src/catalog.ts",
       "src/claude-quota.ts",
+      "src/compaction.ts",
       "src/config.ts",
       "src/media-defaults.ts",
       "src/media.ts",

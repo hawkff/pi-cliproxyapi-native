@@ -20,6 +20,7 @@ import {
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { type CpaApi, endpoint, mapCatalog, modelRoute } from "./catalog.ts";
 import { type QuotaWaitHandler, waitForClaudeQuota } from "./claude-quota.ts";
+import { withCompactionRecovery } from "./compaction.ts";
 import { type Config, isRecord, PROVIDER_ID } from "./config.ts";
 
 export type { QuotaWaitHandler } from "./claude-quota.ts";
@@ -176,7 +177,12 @@ async function waitForQuota(resetAt: number, signal?: AbortSignal, onWait?: Quot
   }
 }
 
-function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandler): ProviderStreams {
+function route(
+  streams: ProviderStreams,
+  config: Config,
+  compactionSignals: WeakSet<AbortSignal>,
+  onWait?: QuotaWaitHandler,
+): ProviderStreams {
   const wrap =
     (stream: ProviderStreams["streamSimple"]): ProviderStreams["streamSimple"] =>
     (selected, context, options) => {
@@ -330,13 +336,17 @@ function route(streams: ProviderStreams, config: Config, onWait?: QuotaWaitHandl
         },
       }));
     };
-  return { stream: wrap(streams.stream), streamSimple: wrap(streams.streamSimple) };
+  return {
+    stream: wrap(streams.stream),
+    streamSimple: withCompactionRecovery(wrap(streams.streamSimple), compactionSignals),
+  };
 }
 
 export function createCliproxyProvider(
   config: Config,
   known: readonly Model<Api>[] = builtinCatalog(),
   onQuotaWait?: QuotaWaitHandler,
+  compactionSignals = new WeakSet<AbortSignal>(),
 ) {
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
@@ -372,10 +382,10 @@ export function createCliproxyProvider(
       return (await discover(config, context.credential.key, context.signal, known)).models;
     },
     api: {
-      "anthropic-messages": route(anthropicMessagesApi(), config, onQuotaWait),
-      "openai-responses": route(openAIResponsesApi(), config, onQuotaWait),
-      "openai-completions": route(openAICompletionsApi(), config, onQuotaWait),
-      "google-generative-ai": route(googleGenerativeAIApi(), config, onQuotaWait),
+      "anthropic-messages": route(anthropicMessagesApi(), config, compactionSignals, onQuotaWait),
+      "openai-responses": route(openAIResponsesApi(), config, compactionSignals, onQuotaWait),
+      "openai-completions": route(openAICompletionsApi(), config, compactionSignals, onQuotaWait),
+      "google-generative-ai": route(googleGenerativeAIApi(), config, compactionSignals, onQuotaWait),
     },
   });
   const refresh = provider.refreshModels;
