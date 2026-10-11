@@ -200,13 +200,51 @@ test("aliases keep wire IDs, hidden entries disappear, and unknowns are not gues
   );
 });
 
+test("auth prefixes keep separate entries and reuse metadata without guessing custom prefixes", () => {
+  const config = parseConfig({
+    aliases: {
+      "team-chat": "anthropic/claude-fixture",
+      "api/team-chat": "openai/gpt-fixture",
+    },
+  });
+  const ids = known.flatMap(({ id }) => [id, `oauth/${id}`, `api/${id}`]);
+  const data = [...ids, "oauth/team-chat", "api/team-chat", "custom/claude-fixture", "API/claude-fixture"];
+  const mapped = mapCatalog({ data: data.map((id) => ({ id })) }, config, known);
+  assert.deepEqual(
+    mapped.models.map((model) => model.id),
+    data.slice(0, -2),
+  );
+  assert.deepEqual(mapped.skipped, data.slice(-2));
+  for (const model of mapped.models) {
+    assert.match(
+      model.name,
+      model.id.startsWith("api/")
+        ? / · API key$/
+        : model.id.startsWith("oauth/")
+          ? / · OAuth$/
+          : / · Automatic \(proxy routing\)$/,
+    );
+  }
+  assert.equal(mapped.models.find((model) => model.id === "oauth/team-chat")?.api, "anthropic-messages");
+  assert.equal(mapped.models.find((model) => model.id === "api/team-chat")?.api, "openai-responses");
+  const ambiguous = [...known, { ...known[1], id: known[0].id }];
+  assert.deepEqual(mapCatalog({ data: [{ id: "api/claude-fixture" }] }, config, ambiguous).models, []);
+  assert.equal(
+    mapCatalog({ data: [{ id: "api/claude-fixture", owned_by: "claude" }] }, config, ambiguous).models[0].api,
+    "anthropic-messages",
+  );
+});
+
 test("Antigravity high IDs use exact Claude metadata fallbacks without changing advertised IDs", () => {
   const sources = builtinCatalog();
   for (const canonical of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
     const reference = sources.find((model) => model.provider === "anthropic" && model.id === canonical);
     assert.ok(reference);
     const bare = `${canonical}-high`;
-    for (const id of [bare, `antigravity/${bare}`, `vertex/${bare}`]) {
+    for (const id of [
+      bare,
+      ...["antigravity", "vertex", "api", "oauth"].map((prefix) => `${prefix}/${bare}`),
+    ]) {
       const catalog = { data: [{ id }] };
       const mapped = mapCatalog(catalog, parseConfig({}), sources);
       assert.deepEqual(mapped.skipped, []);
@@ -588,7 +626,7 @@ function respond(res: ServerResponse, api: string, model?: string) {
 test("native adapters stream each family and qualified route through the right endpoint with the proxy key", async (t) => {
   for (const source of known.flatMap((model) => [
     model,
-    ...["vertex", "antigravity"].map((prefix) => ({ ...model, id: `${prefix}/${model.id}` })),
+    ...["vertex", "antigravity", "api", "oauth"].map((prefix) => ({ ...model, id: `${prefix}/${model.id}` })),
   ])) {
     await t.test(source.id, async (t) => {
       const actualApi = source.api === "openai-codex-responses" ? "openai-responses" : source.api;
@@ -761,7 +799,12 @@ test("quota timing requires a temporary limit and a bounded future reset", () =>
 test("native chat adapters wait for quota reset before retrying the same request", {
   timeout: 20000,
 }, async (t) => {
-  for (const source of [known[1], known[4], { ...known[3], id: `antigravity/${known[3].id}` }]) {
+  for (const source of [
+    known[1],
+    known[4],
+    { ...known[0], id: `api/${known[0].id}` },
+    { ...known[3], id: `antigravity/${known[3].id}` },
+  ]) {
     await t.test(source.api, async (t) => {
       t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2030-01-01T00:00:00Z") });
       const waiting = Promise.withResolvers<void>();
@@ -792,7 +835,13 @@ test("native chat adapters wait for quota reset before retrying the same request
       const stream = provider.streamSimple(
         model,
         normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
-        { apiKey: key, maxRetries: 0, timeoutMs: 500, maxTokens: 32 },
+        {
+          apiKey: key,
+          maxRetries: 0,
+          timeoutMs: 500,
+          maxTokens: 32,
+          env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" },
+        },
       );
       const events: string[] = [];
       const completed = (async () => {
@@ -915,6 +964,7 @@ function mockClaudeManagement(t: TestContext, baseUrl: string, usage: (account: 
   const seen = {
     calls: 0,
     status: 200,
+    modelIds: [known[0].id],
     accounts: [
       {
         provider: "claude",
@@ -933,7 +983,8 @@ function mockClaudeManagement(t: TestContext, baseUrl: string, usage: (account: 
     assert.equal(init?.redirect, "error");
     assert.ok(init?.signal);
     if (url.pathname.endsWith("/auth-files")) return Response.json({ files: seen.accounts });
-    if (url.pathname.endsWith("/auth-files/models")) return Response.json({ models: [{ id: known[0].id }] });
+    if (url.pathname.endsWith("/auth-files/models"))
+      return Response.json({ models: seen.modelIds.map((id) => ({ id })) });
     assert.ok(url.pathname.endsWith("/api-call"));
     assert.equal(init?.method, "POST");
     const body = JSON.parse(String(init?.body));
@@ -1326,6 +1377,103 @@ test("one malformed account does not hide usable quota in the rest of the pool",
   const quota = await fetchClaudeQuota(config, "fixture-management-key", known[0].id);
   assert.equal(quota.state, "ready");
   assert.equal(seen.calls, 2);
+});
+
+test("API-key routes return billing and rate errors without OAuth lookup or route fallback", async (t) => {
+  for (const status of [400, 429]) {
+    await t.test(String(status), async (t) => {
+      const id = `api/${known[0].id}`;
+      const requests: string[] = [];
+      const baseUrl = await server(t, (req, res) => {
+        requests.push(new URL(req.url ?? "", "http://localhost").pathname);
+        let body = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          assert.equal(new URL(req.url ?? "", "http://localhost").pathname, "/v1/messages");
+          assert.equal(JSON.parse(body).model, id);
+          res.writeHead(status, { "content-type": "application/json" }).end(
+            JSON.stringify({
+              error: {
+                type: status === 429 ? "rate_limit_error" : "invalid_request_error",
+                message: "Fixture API limit",
+              },
+            }),
+          );
+        });
+      });
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, () => assert.fail("Must not wait on OAuth"));
+      const model = mapCatalog({ data: [{ id }] }, config, known).models[0];
+      assert.ok(model);
+      const result = await provider
+        .streamSimple(
+          model,
+          normalizeContext({ messages: [{ role: "user", content: "fixture", timestamp: 0 }] }),
+          {
+            apiKey: key,
+            maxRetries: 0,
+            signal: AbortSignal.timeout(5000),
+            env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" },
+          },
+        )
+        .result();
+      assert.equal(result.stopReason, "error");
+      assert.match(result.errorMessage ?? "", /Fixture API limit/);
+      assert.deepEqual(requests, ["/v1/messages"]);
+    });
+  }
+});
+
+test("OAuth routes retain live quota handling for the prefixed model", async (t) => {
+  const id = `oauth/${known[0].id}`;
+  let requests = 0;
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    requests++;
+    claudeCooldown(res);
+  });
+  const seen = mockClaudeManagement(t, baseUrl, () => claudeUsage(Date.now() + 900000, 0, 100));
+  seen.modelIds = [id];
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, known);
+  const model = mapCatalog({ data: [{ id }] }, config, known).models[0];
+  assert.ok(model);
+  const result = await provider
+    .streamSimple(
+      model,
+      normalizeContext({ messages: [{ role: "user", content: "fixture", timestamp: 0 }] }),
+      {
+        apiKey: key,
+        maxRetries: 0,
+        signal: AbortSignal.timeout(5000),
+        env: { CLIPROXYAPI_MANAGEMENT_KEY: "fixture-management-key" },
+      },
+    )
+    .result();
+  assert.match(result.errorMessage ?? "", /Seven-day quota is exhausted/);
+  assert.equal(seen.calls, 1);
+  assert.equal(requests, 1);
+});
+
+test("OAuth alias quota lookup uses canonical metadata and prefers the full alias", async (t) => {
+  const id = "oauth/team-chat";
+  const baseUrl = "https://proxy.example";
+  const seen = mockClaudeManagement(t, baseUrl, () => ({
+    ...claudeUsage(Date.now() + 900000, 0),
+    seven_day_opus: { utilization: 100, resets_at: new Date(Date.now() + 86400000).toISOString() },
+  }));
+  seen.modelIds = [id];
+  const config = parseConfig({
+    baseUrl,
+    aliases: { "team-chat": "anthropic/claude-opus-fixture" },
+    quota: { waitForWeeklyReset: true },
+  });
+  assert.equal((await fetchClaudeQuota(config, "fixture-management-key", id)).state, "blocked");
+  config.aliases[id] = "anthropic/claude-sonnet-fixture";
+  assert.equal((await fetchClaudeQuota(config, "fixture-management-key", id)).state, "ready");
 });
 
 test("repeated header cooldowns cannot extend the original weekly waiting deadline", {
@@ -1759,7 +1907,10 @@ test("catalog preserves separate backend IDs, canonical aliases and exact alias 
 });
 
 test("qualified chat IDs restore in the native registry and resolve exact CLI thinking references", async (t) => {
-  const ids = [known[0].id, `vertex/${known[0].id}`, `antigravity/${known[0].id}`];
+  const ids = [
+    known[0].id,
+    ...["vertex", "antigravity", "api", "oauth"].map((prefix) => `${prefix}/${known[0].id}`),
+  ];
   let gets = 0;
   const baseUrl = await server(t, (_req, res) => {
     gets++;
@@ -1877,7 +2028,7 @@ test("qualified Gemini adapters retain thinking, tool IDs, strict sampling, imag
     await run(source.id, history(source.id), ({ model: _model, ...payload }) => {
       baseline = JSON.parse(JSON.stringify(payload));
     });
-    for (const prefix of ["vertex", "antigravity"]) {
+    for (const prefix of ["vertex", "antigravity", "api", "oauth"]) {
       const id = `${prefix}/${source.id}`;
       await run(id, history(id), ({ model: _model, ...payload }) => {
         assert.deepEqual(JSON.parse(JSON.stringify(payload)), baseline);
@@ -1888,13 +2039,40 @@ test("qualified Gemini adapters retain thinking, tool IDs, strict sampling, imag
         }
         if (source.id.startsWith("gemini-2")) assert.match(JSON.stringify(payload), /Tool result image:/);
       });
-      for (const previous of [source.id, `${prefix === "vertex" ? "antigravity" : "vertex"}/${source.id}`]) {
+      for (const previous of [
+        source.id,
+        ...["vertex", "antigravity", "api", "oauth"]
+          .filter((other) => other !== prefix)
+          .map((other) => `${other}/${source.id}`),
+      ]) {
         await run(id, history(previous), (payload) =>
           assert.ok(!JSON.stringify(payload).includes(signature)),
         );
       }
     }
   }
+});
+
+test("previous auth-route policy cannot restore prefixed media as chat aliases", async (t) => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("Offline restoration must not contact the proxy"));
+  const id = "api/gpt-image-1.5";
+  const config = parseConfig({ aliases: { [id]: "openai/gpt-fixture" } });
+  const provider = createCliproxyProvider(config, known);
+  await provider.refreshModels({
+    allowNetwork: false,
+    signal: AbortSignal.timeout(5000),
+    stored: {
+      etag: createHash("sha256")
+        .update(JSON.stringify([4, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+        .digest("hex"),
+      models: [{ ...known[1], id, provider: PROVIDER_ID, headers: undefined }],
+    },
+    async publish(publication) {
+      publication.update?.();
+      return true;
+    },
+  });
+  assert.deepEqual(provider.getModels(), []);
 });
 
 test("previous-policy caches cannot restore GPT-image chat aliases", async (t) => {
