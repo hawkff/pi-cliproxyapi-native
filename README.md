@@ -4,6 +4,27 @@ Use [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for chat, image 
 
 Chat uses Pi's native API adapters and model metadata, with availability from your proxy. Image and video tools have separate model selections, so you can generate media without switching your chat model.
 
+## Contents
+
+- [Install](#install)
+- [Connection](#connection)
+- [Images and videos](#images-and-videos)
+  - [Choose a media model](#choose-a-media-model)
+  - [Generate media](#generate-media)
+  - [Resolution and aspect ratio](#resolution-and-aspect-ratio)
+  - [Supported media models](#supported-media-models)
+  - [Files, status, and limits](#files-status-and-limits)
+- [Chat models](#chat-models)
+  - [Refresh](#refresh)
+  - [Wait for quota reset](#wait-for-quota-reset)
+  - [Compaction](#compaction)
+  - [Aliases and model limits](#aliases-and-model-limits)
+- [Backend routes](#backend-routes)
+- [OAuth and API-key routes](#oauth-and-api-key-routes)
+- [Thinking and child sessions](#thinking-and-child-sessions)
+- [Protocol notes](#protocol-notes)
+- [License](#license)
+
 ## Install
 
 The extension targets Pi 1.1.0 and CLIProxyAPI 8.0.22, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
