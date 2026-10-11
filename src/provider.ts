@@ -188,11 +188,12 @@ function route(
     (selected, context, options) => {
       // A resumed selection must not send the current key to an old endpoint.
       const model = { ...selected, baseUrl: endpoint(config.baseUrl, selected.api) };
-      const { metadataId, backend } = modelRoute(model.id);
-      const google = backend && model.api === "google-generative-ai";
+      const { metadataId, prefix, backend, authType } = modelRoute(model.id);
+      const google = prefix && model.api === "google-generative-ai";
       const managementKey =
         options?.env?.CLIPROXYAPI_MANAGEMENT_KEY ?? process.env.CLIPROXYAPI_MANAGEMENT_KEY ?? "";
-      const liveClaude = model.api === "anthropic-messages" && !backend && managementKey !== "";
+      const liveClaude =
+        model.api === "anthropic-messages" && !backend && authType !== "api-key" && managementKey !== "";
       const adapterModel = google ? { ...model, id: metadataId } : model;
       // Google needs canonical IDs for tool turns. Swap identities to keep bare history cross-route.
       const adapterContext = google
@@ -350,7 +351,7 @@ export function createCliproxyProvider(
 ) {
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
-    .update(JSON.stringify([4, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+    .update(JSON.stringify([5, { baseUrl: config.baseUrl, aliases: config.aliases }]))
     .digest("hex");
   const provider = createProvider<CpaApi>({
     id: PROVIDER_ID,

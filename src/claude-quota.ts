@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { modelRoute } from "./catalog.ts";
 import { type Config, isRecord } from "./config.ts";
 
 export type QuotaWaitHandler = (id: symbol, remainingSeconds: number | undefined) => void;
@@ -150,7 +151,9 @@ export async function fetchClaudeQuota(
   // ponytail: probe at most 100 accounts; batch larger pools before raising this limit.
   if (accounts.length > 100)
     throw new Error("Live quota lookup supports at most 100 active Claude accounts.");
-  const reference = config.aliases[modelId] ?? modelId;
+  const { metadataId, prefix } = modelRoute(modelId);
+  const reference =
+    config.aliases[modelId] ?? (prefix ? config.aliases[metadataId] : undefined) ?? metadataId;
   const results = await Promise.allSettled(
     accounts.map(async (account: unknown) => {
       if (

@@ -135,9 +135,9 @@ Your proxy must advertise the exact ID for a model to be available.
 | Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image` |
 | xAI models | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
 
-The listed Gemini image models also support advertised `vertex/` and `antigravity/` routes. Those prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, media aliases, unknown media IDs, Google Veo, and editing endpoints are unsupported.
+Supported media IDs can also use advertised `api/` and `oauth/` credential routes. Gemini image models also support `vertex/` and `antigravity/` backend routes. Those backend prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, nested prefixes, media aliases, unknown media IDs, Google Veo, and editing endpoints are unsupported.
 
-The extension disables these retired Imagen IDs, including their `vertex/` and `antigravity/` forms:
+The extension disables these retired Imagen IDs, including their supported prefixed forms:
 
 - `imagen-3.0-generate-002`
 - `imagen-3.0-fast-generate-001`
@@ -199,6 +199,8 @@ Invalid management credentials, rejected account access, invalid usage data, or 
 
 Management requests stay on the configured proxy and reject redirects. Account access tokens stay in CLIProxyAPI. The extension reads account metadata and proxies usage GETs; it does not reset quotas, change credentials, or clear proxy cooldowns. Management keys grant broader access than chat keys, so keep them private. Live lookup supports up to 100 active Claude subscription accounts.
 
+Explicit `api/` routes skip live Claude subscription lookup, even with a management key. `oauth/` routes keep the lookup for matching OAuth accounts. Retries keep the selected route's full model ID.
+
 Other chat routes retain the response-based fallback: `Retry-After` on HTTP 429 or a recognized quota HTTP 403, or `reset_seconds` in a `model_cooldown` error. Google's native adapter exposes only the structured error body. Those waits share the same seven-day deadline but cannot inspect live weekly usage. Image and video generation still do not retry.
 
 ### Compaction
@@ -225,9 +227,9 @@ To describe a proxy alias, add a canonical metadata reference to `~/.pi/agent/pi
 
 Replace `<canonical-model-id>` with an ID from Pi's Anthropic catalog. References can also use `openai/`, `openai-codex/`, or `google/`. Aliases select metadata; requests retain the original proxy ID.
 
-A `vertex/` or `antigravity/` route can reuse its unprefixed ID's alias if that reference resolves to one metadata entry. An alias for the full prefixed ID takes precedence. Custom prefixes need an explicit chat alias. Arbitrary aliases may lack ID-specific adapter behavior; canonical Gemini IDs and the two recognized prefixes retain native thinking and tool-turn handling.
+The recognized prefixes are `vertex/`, `antigravity/`, `api/`, and `oauth/`. Each can reuse its unprefixed ID's alias if that reference resolves to one metadata entry. An alias for the full prefixed ID takes precedence. Other prefixes need an explicit chat alias. Arbitrary aliases may lack ID-specific adapter behavior; canonical Gemini IDs and the recognized prefixes retain native thinking and tool-turn handling.
 
-For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and recognized `antigravity/` or `vertex/` routes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi and names the model like a configured alias, for example `claude-opus-5-5-high (Claude Opus 5.5)`; requests keep the advertised `-high` ID.
+For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and the recognized route prefixes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi and names the model like a configured alias, for example `claude-opus-5-5-high (Claude Opus 5.5)`; requests keep the advertised `-high` ID.
 
 Use Pi's `models.json` `modelOverrides` for limits, prices, or compatibility changes. Use its `models` array for IDs with no built-in metadata. Updating Pi supplies newer metadata. Catalog prices are estimates, not the proxy's bill; check upstream limits before increasing them.
 
@@ -243,6 +245,27 @@ Keep the full advertised ID when selecting a backend, for example:
 These examples select media defaults. Chat routes belong in Pi's built-in `/model` picker.
 
 Set the CLIProxyAPI auth record's top-level `prefix` to `vertex` or `antigravity` to advertise those routes. With `routing.force-model-prefix: false` in CLIProxyAPI 8, the proxy retains bare IDs too. Legacy configurations use the top-level `force-model-prefix` setting. This extension does not change proxy configuration or restart it.
+
+## OAuth and API-key routes
+
+CLIProxyAPI can advertise separate model IDs for OAuth and API-key credentials. The extension labels `oauth/<model>` as **OAuth** and `api/<model>` as **API key**. It matches the unprefixed model's metadata and sends the full advertised ID on requests. It does not retry an explicit route as a bare ID or another credential route.
+
+Configure the prefixes in CLIProxyAPI's v8 layout:
+
+- For an API-key group, set `api-keys.<provider>[].prefix` to `api`. A key-level `prefix` can override the group value.
+- For an OAuth credential, set the auth record's top-level `prefix` to `oauth`.
+
+If a legacy file stores client keys in the root `api-keys` list, migrate them to `access.api-keys` before adding provider groups. A successful v8 management write performs this migration.
+
+CLIProxyAPI also supports per-group and per-key model aliases, exclusions, priorities, and proxy overrides. See its [configuration fields](https://github.com/router-for-me/cliproxyapidocs/blob/main/docs/en/configuration/options.md).
+
+The [v8 management API](https://github.com/router-for-me/cliproxyapidocs/blob/main/docs/en/management/apiv8.md) manages API-key groups through `/v8/management/config/api-keys/<provider>`. These lists must be replaced as a whole; numeric paths cannot select an entry. OAuth fields use `PATCH /v8/management/credentials/fields`. The extension does not call these endpoints or need a management key for model discovery.
+
+After setting the prefixes, run `/cliproxyapi-refresh`. Choose `cliproxyapi/oauth/<model>` or `cliproxyapi/api/<model>` in Pi's `/model` picker. Media routes appear in `/cli:model`.
+
+The extension trusts your prefix configuration; it does not inspect credential types. Keep each prefix limited to its matching credential type. Unprefixed IDs remain **Automatic (proxy routing)** and may use either pool. Set `routing.force-model-prefix: true` in CLIProxyAPI to exclude prefixed credentials from unprefixed requests.
+
+Chat and media selections remain independent. The automatic OpenAI image default is still unprefixed; select a prefixed media model to choose its credential route.
 
 ## Thinking and child sessions
 

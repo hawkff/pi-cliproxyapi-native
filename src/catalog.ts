@@ -36,15 +36,20 @@ export function parseCatalog(value: unknown) {
 
 // Resolve metadata and capabilities without changing registry or request IDs.
 export function modelRoute(id: string) {
-  const match = /^(vertex|antigravity)\/(.+)$/.exec(id);
+  const match = /^(vertex|antigravity|oauth|api)\/(.+)$/.exec(id);
+  const prefix = match?.[1];
   return {
     metadataId: match?.[2] ?? id,
-    backend: match ? (match[1] === "vertex" ? "Vertex" : "Antigravity") : undefined,
+    prefix,
+    backend: prefix === "vertex" ? "Vertex" : prefix === "antigravity" ? "Antigravity" : undefined,
+    authType: prefix === "api" ? "api-key" : prefix === "oauth" ? "oauth" : undefined,
   };
 }
 
 export function backendLabel(id: string) {
-  return modelRoute(id).backend ?? (id.includes("/") ? "Unknown backend" : "Automatic (proxy routing)");
+  const { backend, authType } = modelRoute(id);
+  if (authType) return authType === "api-key" ? "API key" : "OAuth";
+  return backend ?? (id.includes("/") ? "Unknown backend" : "Automatic (proxy routing)");
 }
 
 export function routedName(id: string, name = id) {
@@ -188,11 +193,11 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       skipped.add(entry.id);
       continue;
     }
-    const { metadataId, backend } = modelRoute(entry.id);
-    const routed = !entry.id.includes("/") || backend;
+    const { metadataId, prefix } = modelRoute(entry.id);
+    const routed = !entry.id.includes("/") || prefix;
     const alias = Object.hasOwn(config.aliases, entry.id)
       ? config.aliases[entry.id]
-      : backend && Object.hasOwn(config.aliases, metadataId)
+      : prefix && Object.hasOwn(config.aliases, metadataId)
         ? config.aliases[metadataId]
         : routed && !byId.has(metadataId)
           ? metadataFallbacks.get(metadataId)

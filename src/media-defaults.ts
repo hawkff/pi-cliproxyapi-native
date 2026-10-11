@@ -34,12 +34,12 @@ export function readMediaDefaults(config: Config, ctx: DefaultsContext) {
 export function automaticImageDefault(config: Config, ctx: DefaultsContext) {
   const model = ctx.model;
   if (!model || mediaPurpose(model.id)) return undefined;
-  const { metadataId, backend } = modelRoute(model.id);
+  const { metadataId, prefix } = modelRoute(model.id);
   const alias =
     model.provider === PROVIDER_ID
       ? Object.hasOwn(config.aliases, model.id)
         ? config.aliases[model.id]
-        : backend && Object.hasOwn(config.aliases, metadataId)
+        : prefix && Object.hasOwn(config.aliases, metadataId)
           ? config.aliases[metadataId]
           : undefined
       : undefined;
