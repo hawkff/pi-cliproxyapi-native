@@ -27,15 +27,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.1.0 and CLIProxyAPI 8.0.22, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.3.0 and CLIProxyAPI 8.0.30, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.1.9
+pi install npm:pi-cliproxyapi-native@0.2.0
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.1.9`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.0`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -251,6 +251,8 @@ Replace `<canonical-model-id>` with an ID from Pi's Anthropic catalog. Reference
 The recognized prefixes are `vertex/`, `antigravity/`, `api/`, and `oauth/`. Each can reuse its unprefixed ID's alias if that reference resolves to one metadata entry. An alias for the full prefixed ID takes precedence. Other prefixes need an explicit chat alias. Arbitrary aliases may lack ID-specific adapter behavior; canonical Gemini IDs and the recognized prefixes retain native thinking and tool-turn handling.
 
 For Antigravity IDs `claude-opus-5-5-high` and `claude-sonnet-5-5-high`, the extension falls back to `anthropic/claude-opus-5-5` and `anthropic/claude-sonnet-5-5` metadata. This applies to bare IDs and the recognized route prefixes. Explicit aliases take precedence, followed by exact native metadata. The fallback requires the corresponding canonical entry in Pi and names the model like a configured alias, for example `claude-opus-5-5-high (Claude Opus 5.5)`; requests keep the advertised `-high` ID.
+
+The same fallback rules map `gemini-4-argon-high` to `google/gemini-4-argon`, including recognized route prefixes.
 
 Use Pi's `models.json` `modelOverrides` for limits, prices, or compatibility changes. Use its `models` array for IDs with no built-in metadata. Updating Pi supplies newer metadata. Catalog prices are estimates, not the proxy's bill; check upstream limits before increasing them.
 

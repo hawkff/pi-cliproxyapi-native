@@ -180,6 +180,7 @@ const owners: Readonly<Record<string, string>> = {
 const metadataFallbacks = new Map([
   ["claude-opus-5-5-high", "anthropic/claude-opus-5-5"],
   ["claude-sonnet-5-5-high", "anthropic/claude-sonnet-5-5"],
+  ["gemini-4-argon-high", "google/gemini-4-argon"],
 ]);
 
 export function mapCatalog(value: unknown, config: Config, known: readonly Model<Api>[]) {
