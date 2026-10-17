@@ -965,7 +965,9 @@ test("quota handling does not replay a stream after it starts", async (t) => {
 
 function mockClaudeManagement(t: TestContext, baseUrl: string, usage: (account: string) => unknown) {
   const original = globalThis.fetch;
+  const urls: string[] = [];
   const seen = {
+    urls,
     calls: 0,
     status: 200,
     modelIds: [known[0].id],
@@ -981,15 +983,22 @@ function mockClaudeManagement(t: TestContext, baseUrl: string, usage: (account: 
   };
   t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : input);
-    if (!url.pathname.includes("/v0/management/")) return original(input, init);
-    assert.ok(url.href.startsWith(`${baseUrl}/v0/management/`));
+    if (!url.pathname.includes("/management/")) return original(input, init);
+    seen.urls.push(url.href);
+    assert.ok(url.href.startsWith(`${baseUrl}/v8/management/`));
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-management-key");
     assert.equal(init?.redirect, "error");
     assert.ok(init?.signal);
-    if (url.pathname.endsWith("/auth-files")) return Response.json({ files: seen.accounts });
-    if (url.pathname.endsWith("/auth-files/models"))
+    if (url.href === `${baseUrl}/v8/management/credentials`) {
+      assert.equal(init?.method, "GET");
+      return Response.json({ files: seen.accounts });
+    }
+    if (url.pathname.endsWith("/credentials/models")) {
+      assert.equal(init?.method, "GET");
+      assert.ok(seen.accounts.some((account) => account.name === url.searchParams.get("name")));
       return Response.json({ models: seen.modelIds.map((id) => ({ id })) });
-    assert.ok(url.pathname.endsWith("/api-call"));
+    }
+    assert.equal(url.href, `${baseUrl}/v8/management/requests/api-call`);
     assert.equal(init?.method, "POST");
     const body = JSON.parse(String(init?.body));
     assert.equal(body.method, "GET");
@@ -1024,6 +1033,19 @@ function claudeCooldown(res: ServerResponse) {
     }),
   );
 }
+
+test("live Claude quota uses v8 routes and encodes account names under a path prefix", async (t) => {
+  const config = parseConfig({ baseUrl: "https://proxy.example/gateway" });
+  const seen = mockClaudeManagement(t, config.baseUrl, () => claudeUsage(Date.now() + 900000, 20));
+  seen.accounts[0].name = "fixture +#.json";
+  assert.deepEqual(await fetchClaudeQuota(config, "fixture-management-key", known[0].id), { state: "ready" });
+  assert.deepEqual(seen.urls, [
+    "https://proxy.example/gateway/v8/management/credentials",
+    "https://proxy.example/gateway/v8/management/credentials/models?name=fixture%20%2B%23.json",
+    "https://proxy.example/gateway/v8/management/requests/api-call",
+  ]);
+  assert.equal(seen.calls, 1);
+});
 
 test("live Claude windows distinguish five-hour, weekly, and model-scoped exhaustion", () => {
   const now = Date.parse("2030-01-01T00:00:00Z");
@@ -1314,6 +1336,7 @@ test("weekly exhaustion discovered during a wait stops before another chat reque
 test("management quota failures reject redirects and oversized bodies without exposing upstream content", async (t) => {
   for (const fixture of [
     () => new Response("fixture-private-content", { status: 401 }),
+    () => new Response("fixture-private-content", { status: 404 }),
     () => new Response("fixture-private-content", { status: 503 }),
     () =>
       new Response("fixture-private-content", {
@@ -1323,8 +1346,9 @@ test("management quota failures reject redirects and oversized bodies without ex
     () => new Response("fixture-private-content"),
     () => new Response("x".repeat(2 * 1024 * 1024 + 1)),
   ]) {
+    const urls: string[] = [];
     t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      assert.equal(String(input), "https://proxy.example/v0/management/auth-files");
+      urls.push(String(input));
       assert.equal(init?.redirect, "error");
       return fixture();
     });
@@ -1339,6 +1363,7 @@ test("management quota failures reject redirects and oversized bodies without ex
         !error.message.includes("fixture-private-content") &&
         !error.message.includes("fixture-management-key"),
     );
+    assert.deepEqual(urls, ["https://proxy.example/v8/management/credentials"]);
     t.mock.restoreAll();
   }
 });

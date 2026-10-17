@@ -15,7 +15,7 @@ async function managementRequest(
 ) {
   let response: Response;
   try {
-    response = await fetch(`${config.baseUrl}/v0/management/${path}`, {
+    response = await fetch(`${config.baseUrl}/v8/management/${path}`, {
       method: body ? "POST" : "GET",
       headers: { Authorization: `Bearer ${key}`, ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
@@ -135,7 +135,7 @@ export async function fetchClaudeQuota(
     );
   }
   const bounded = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15000)]);
-  const listing = await managementRequest(config, key, "auth-files", bounded);
+  const listing = await managementRequest(config, key, "credentials", bounded);
   if (!isRecord(listing) || !Array.isArray(listing.files) || listing.files.length > 10000) {
     throw new Error("The management API returned an invalid account list.");
   }
@@ -168,13 +168,13 @@ export async function fetchClaudeQuota(
       const models = await managementRequest(
         config,
         key,
-        `auth-files/models?name=${encodeURIComponent(account.name)}`,
+        `credentials/models?name=${encodeURIComponent(account.name)}`,
         bounded,
       );
       if (!isRecord(models) || !Array.isArray(models.models))
         throw new Error("The management API returned an invalid account catalog.");
       if (!models.models.some((model: unknown) => isRecord(model) && model.id === modelId)) return undefined;
-      const response = await managementRequest(config, key, "api-call", bounded, {
+      const response = await managementRequest(config, key, "requests/api-call", bounded, {
         auth_index: account.auth_index,
         method: "GET",
         url: "https://api.anthropic.com/api/oauth/usage",

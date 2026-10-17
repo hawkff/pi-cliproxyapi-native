@@ -27,15 +27,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.3.0 and CLIProxyAPI 8.0.30, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.3.0 and CLIProxyAPI 8.0.32, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.2.0
+pi install npm:pi-cliproxyapi-native@0.2.1
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.0`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.1`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -218,7 +218,7 @@ Without a management key, Claude retains its SDK retry settings and response-bas
 
 Invalid management credentials, rejected account access, invalid usage data, or an exhausted allowance with an expired reset stop the quota wait with an explanation. These failures do not trigger Pi's quick retries. Extension-managed waits share one fixed seven-day deadline per provider call; a new cooldown cannot extend it. The extension checks the deadline after waking and before accepting available quota, including after machine sleep. It does not replay a request that has started streaming.
 
-Management requests stay on the configured proxy and reject redirects. Account access tokens stay in CLIProxyAPI. The extension reads account metadata and proxies usage GETs; it does not reset quotas, change credentials, or clear proxy cooldowns. Management keys grant broader access than chat keys, so keep them private. Live lookup supports up to 100 active Claude subscription accounts.
+Live quota lookup requires CLIProxyAPI's `/v8/management` API and does not fall back to legacy `/v0/management` routes. Management requests stay on the configured proxy and reject redirects. Account access tokens stay in CLIProxyAPI. The extension reads account metadata and proxies usage GETs; it does not reset quotas, change credentials, or clear proxy cooldowns. Management keys grant broader access than chat keys, so keep them private. Live lookup supports up to 100 active Claude subscription accounts.
 
 Explicit `api/` routes skip live Claude subscription lookup, even with a management key. `oauth/` routes keep the lookup for matching OAuth accounts. Retries keep the selected route's full model ID.
 
