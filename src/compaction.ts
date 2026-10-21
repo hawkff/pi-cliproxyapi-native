@@ -10,7 +10,7 @@ export function withCompactionRecovery(
     return lazyStream(model, async () => ({
       async *[Symbol.asyncIterator]() {
         const limit = model.maxTokens > 0 ? model.maxTokens : 32768;
-        let maxTokens = Math.max(1, Math.min(options.maxTokens ?? 16384, limit));
+        let maxTokens = Math.max(1, Math.min(options.maxTokens ?? limit, limit));
         const reasoning =
           options.reasoning && !["minimal", "low"].includes(options.reasoning) ? "low" : options.reasoning;
         const run = () =>

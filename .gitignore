@@ -14,21 +14,9 @@ coverage/
 *.local.*
 *.log
 .cache/
-.pi/
-.pi-subagents/
-.agents/
-.claude/
-.codex/
 /auth.json
 /config.json
 /models.json
-
-# Local instructions and review notes
-AGENTS.md
-AGENTS.override.md
-CLAUDE.md
-/review-notes/
-/plans/
 
 # Editor and operating-system files
 .idea/

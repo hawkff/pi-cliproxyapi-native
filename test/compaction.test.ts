@@ -129,6 +129,21 @@ test("compaction retries a capped summary once with more output room and lower t
   assert.equal(options.maxTokens, 8192);
 });
 
+test("compaction without an explicit cap uses the model output limit", async () => {
+  for (const maxTokens of [8192, 131072, 0]) {
+    const { stream, calls, options } = fixture([response()]);
+    const result = await stream({ ...model, maxTokens }, context, {
+      ...options,
+      maxTokens: undefined,
+    }).result();
+    assert.equal(result.stopReason, "stop");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].maxTokens, maxTokens > 0 ? maxTokens : 32768);
+    assert.equal(calls[0].reasoning, "low");
+    assert.equal(calls[0].thinkingBudgets, undefined);
+  }
+});
+
 test("ordinary requests keep their options, result, and retry behavior", async () => {
   const original = response({ stopReason: "length" });
   const { stream, calls, options } = fixture([original]);
@@ -242,7 +257,7 @@ for (const mode of ["manual", "threshold", "split", "exhausted", "empty", "trans
       bodies.push(body);
       if (mode === "transient" && bodies.length === 1)
         return Response.json({ error: { message: "server_busy" } }, { status: 503 });
-      const capped = mode === "exhausted" || (bodies.length === 1 && mode !== "empty");
+      const capped = mode === "exhausted";
       const text = mode === "empty" ? "" : capped ? "Partial" : "Checkpoint";
       const item = {
         type: "message",
@@ -297,7 +312,8 @@ for (const mode of ["manual", "threshold", "split", "exhausted", "empty", "trans
     await session.bindExtensions({});
     if (mode === "exhausted" || mode === "empty") {
       await assert.rejects(session.compact(), mode === "exhausted" ? /token cap/ : /complete text summary/);
-      assert.equal(bodies.length, 2);
+      assert.equal(bodies.length, mode === "exhausted" ? 1 : 2);
+      assert.ok(bodies.every((body) => body.max_output_tokens === selected.maxTokens));
       assert.ok(!sessionManager.getEntries().some((entry) => entry.type === "compaction"));
       assert.equal(sessionManager.buildSessionContext().messages.length, 3);
       return;
@@ -311,16 +327,16 @@ for (const mode of ["manual", "threshold", "split", "exhausted", "empty", "trans
     const checkpoint = sessionManager.getEntries().find((entry) => entry.type === "compaction");
     assert.ok(checkpoint && checkpoint.type === "compaction");
     assert.equal(checkpoint.fromHook, false);
-    assert.equal(checkpoint.usage?.totalTokens, mode === "split" ? 45 : mode === "transient" ? 15 : 30);
+    assert.equal(checkpoint.usage?.totalTokens, mode === "split" ? 30 : 15);
     const summaries = mode === "threshold" ? bodies.slice(0, -1) : bodies;
-    assert.deepEqual(
-      summaries.map((body) => body.max_output_tokens),
-      mode === "split" ? [13107, 26214, 8192] : mode === "transient" ? [13107, 13107] : [13107, 26214],
-    );
+    assert.equal(summaries.length, mode === "split" || mode === "transient" ? 2 : 1);
+    assert.ok(summaries.every((body) => body.max_output_tokens === selected.maxTokens));
+    if (mode !== "threshold")
+      assert.ok(summaries.every((body) => JSON.stringify(body).includes("Preserve file paths.")));
     assert.ok(summaries.every((body) => isRecord(body.reasoning) && body.reasoning.effort === "low"));
     assert.equal(session.thinkingLevel, "high");
     if (mode === "threshold") {
-      assert.equal(bodies.length, 3);
+      assert.equal(bodies.length, 2);
       assert.deepEqual(bodies.at(-1)?.reasoning, { effort: "high", summary: "auto" });
     } else if (mode !== "split") {
       assert.equal(sessionManager.buildSessionContext().messages.at(-1)?.role, "user");
