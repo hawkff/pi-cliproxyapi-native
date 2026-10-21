@@ -27,15 +27,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.3.0 and CLIProxyAPI 8.0.32, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.38, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.2.1
+pi install npm:pi-cliproxyapi-native@0.2.2
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.1`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.2`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -226,9 +226,11 @@ Other chat routes retain the response-based fallback: `Retry-After` on HTTP 429 
 
 ### Compaction
 
-For automatic compaction and `/compact`, the extension limits medium or higher thinking to low without changing your chat thinking level. It uses Pi's default thinking budgets for these requests. If a summary hits its output cap, it retries once with more output room, up to the model's output limit. Pi's native adapters also limit output to the remaining context space. An empty or thinking-only response gets one retry.
+For automatic compaction and `/compact`, the extension limits medium or higher thinking to low without changing your chat thinking level. It uses Pi's default thinking budgets for these requests. Without an explicit output cap, summaries use the model's output limit. Pi's native adapters reduce the output allowance when needed to fit the remaining context space.
 
-Pi still selects which messages to summarize and retains recent history, previous summaries, custom instructions, and file tracking. Only the final response reaches the compactor, with usage from both attempts. A second incomplete response fails compaction rather than saving a partial checkpoint. Cancellation, tool calls, and provider failures do not trigger these output retries; Pi keeps its configured transient-error retries and the extension keeps its quota handling.
+If a caller supplies a smaller cap and the summary hits it, the extension retries once with more output room, up to the model's output limit. An empty or thinking-only response gets one retry, including at the model's output limit.
+
+Pi still selects which messages to summarize and retains recent history, previous summaries, custom instructions, and file tracking. Only the final response reaches the compactor, with usage from all attempts. Compaction fails rather than saving an incomplete summary. Cancellation, tool calls, and provider failures do not trigger these output retries; Pi keeps its configured transient-error retries and the extension keeps its quota handling.
 
 Authentication failures, exhausted quotas, and inputs that exceed the model's context window still need correction. Run `/compact` after resolving the cause. The extension does not truncate history to force a summary or switch models. CLIProxyAPI's Responses compaction endpoint is separate from Pi's text-summary workflow.
 
