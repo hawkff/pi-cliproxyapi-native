@@ -5,6 +5,7 @@ import { PROVIDER_ID, parseConfig } from "../src/config.ts";
 import { registerMediaTools } from "../src/media.ts";
 import { registerModelPicker } from "../src/picker.ts";
 import { createCliproxyProvider } from "../src/provider.ts";
+import { registerAutoRetry } from "../src/retry.ts";
 
 export default async function (pi: ExtensionAPI) {
   let contents = "{}";
@@ -62,6 +63,7 @@ export default async function (pi: ExtensionAPI) {
       compactionSignals,
     ),
   );
+  registerAutoRetry(pi);
   registerMediaTools(pi, config);
   registerModelPicker(pi, config);
   pi.registerCommand("cliproxyapi-refresh", {
