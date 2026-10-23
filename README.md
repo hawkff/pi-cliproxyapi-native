@@ -17,6 +17,7 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 - [Chat models](#chat-models)
   - [Refresh](#refresh)
   - [Wait for quota reset](#wait-for-quota-reset)
+  - [Retry failed turns](#retry-failed-turns)
   - [Compaction](#compaction)
   - [Aliases and model limits](#aliases-and-model-limits)
 - [Backend routes](#backend-routes)
@@ -49,7 +50,7 @@ Enter your CLIProxyAPI client key at login. Pi validates it against the proxy be
 
 **Use Pi's built-in `/model` picker for chat.** Choose a `cliproxyapi/` entry there. This extension's `/cli:model` picker is only for CLIProxyAPI image and video models. Selecting a media model does not change chat or generate anything.
 
-Enable only one extension that registers the `cliproxyapi` provider ID. This extension leaves other providers and their hand-written model lists unchanged.
+Enable only one extension that registers the `cliproxyapi` provider ID. Model discovery leaves other providers' model lists unchanged. [Delayed retries](#retry-failed-turns) apply to all providers.
 
 ## Connection
 
@@ -223,6 +224,18 @@ Live quota lookup requires CLIProxyAPI's `/v8/management` API and does not fall 
 Explicit `api/` routes skip live Claude subscription lookup, even with a management key. `oauth/` routes keep the lookup for matching OAuth accounts. Retries keep the selected route's full model ID.
 
 Other chat routes retain the response-based fallback: `Retry-After` on HTTP 429 or a recognized quota HTTP 403, or `reset_seconds` in a `model_cooldown` error. Google's native adapter exposes only the structured error body. Those waits share the same seven-day deadline but cannot inspect live weekly usage. Image and video generation still do not retry.
+
+### Retry failed turns
+
+Available on `main`; not included in the 0.2.2 release.
+
+Keep Pi open in terminal or RPC mode to retry failed model turns across all providers, including those outside CLIProxyAPI. After Pi finishes its built-in retries and recovery, the extension waits ten minutes and adds a visible continuation message to resume the unfinished task. Another failed turn starts another ten-minute wait. Successful turns, tool errors, and deliberate cancellations do not start a wait.
+
+Delayed retries are on by default. Use `/auto-retry` to see the status, `/auto-retry off` to cancel the pending retry and disable future ones, or `/auto-retry on` to enable retries for future failures. Reloading the extension restores the default.
+
+Escape or Ctrl+C cancels a pending retry in the terminal. New input, a model change, manual compaction, or session navigation also cancels it. Reloading or closing Pi discards pending retries. One-shot print and JSON runs do not schedule them.
+
+Retries preserve the conversation rather than replaying the original prompt. They do not fix credentials or increase quotas, and resumed work can incur provider charges. Use `/auto-retry off` if a persistent error needs manual correction.
 
 ### Compaction
 
