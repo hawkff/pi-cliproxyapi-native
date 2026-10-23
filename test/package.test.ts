@@ -47,6 +47,7 @@ test("npm package contains only release files and loads without checkout depende
       "src/media.ts",
       "src/picker.ts",
       "src/provider.ts",
+      "src/retry.ts",
     ],
   );
   await run("tar", ["-xzf", join(directory, entry.filename), "-C", directory], {
@@ -84,7 +85,7 @@ test("npm package contains only release files and loads without checkout depende
         "cliproxyapi_generate_image", "cliproxyapi_generate_video", "cliproxyapi_media_models", "cliproxyapi_video_status",
       ]);
       assert.deepEqual(loaded.extensions.flatMap(extension => [...extension.commands.keys()]).sort(), [
-        "cli:model", "cliproxyapi-refresh",
+        "auto-retry", "cli:model", "cliproxyapi-refresh",
       ]);
       `,
     ],
