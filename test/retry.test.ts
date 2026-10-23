@@ -322,7 +322,10 @@ test("Pi exhausts native retries before delayed continuations and preserves the 
   const originalTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, "setTimeout", (callback: () => void, ms?: number) => {
     if (ms === delay) timeouts.push(requests);
-    return originalTimeout(callback, ms === delay ? 1 : ms);
+    const timer = originalTimeout(callback, ms === delay ? 1 : ms);
+    // The test has no terminal handle to keep the process alive.
+    if (ms === delay) t.mock.method(timer, "unref", () => timer);
+    return timer;
   });
   const completed = new Promise<void>((resolve) => {
     session.subscribe((event) => {
