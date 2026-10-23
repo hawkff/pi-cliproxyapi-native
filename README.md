@@ -33,10 +33,10 @@ The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.38, with Node.js 22.19 or new
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.2.2
+pi install npm:pi-cliproxyapi-native@0.3.0
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.2.2`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.0`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -226,8 +226,6 @@ Explicit `api/` routes skip live Claude subscription lookup, even with a managem
 Other chat routes retain the response-based fallback: `Retry-After` on HTTP 429 or a recognized quota HTTP 403, or `reset_seconds` in a `model_cooldown` error. Google's native adapter exposes only the structured error body. Those waits share the same seven-day deadline but cannot inspect live weekly usage. Image and video generation still do not retry.
 
 ### Retry failed turns
-
-Available on `main`; not included in the 0.2.2 release.
 
 Keep Pi open in terminal or RPC mode to retry failed model turns across all providers, including those outside CLIProxyAPI. After Pi finishes its built-in retries and recovery, the extension waits ten minutes and adds a visible continuation message to resume the unfinished task. Another failed turn starts another ten-minute wait. Successful turns, tool errors, and deliberate cancellations do not start a wait.
 
