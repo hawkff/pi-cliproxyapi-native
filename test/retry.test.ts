@@ -102,7 +102,7 @@ async function fixture(t: TestContext, mode: ExtensionContext["mode"] = "tui") {
     status,
     key: (data: string) => terminalInput?.(data),
     hasInputListener: () => terminalInput !== undefined,
-    command: (args: string) => command.handler(args, ctx as Parameters<typeof command.handler>[1]),
+    command: (args: string) => command.handler(args, ctx as unknown as Parameters<typeof command.handler>[1]),
   };
 }
 
