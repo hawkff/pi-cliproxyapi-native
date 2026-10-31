@@ -62,10 +62,10 @@ Set `CLIPROXYAPI_BASE_URL` or create `~/.pi/agent/pi-cliproxyapi.json`:
 }
 ```
 
-| Setting | Behavior |
-| --- | --- |
-| `CLIPROXYAPI_BASE_URL` | Overrides `baseUrl` in the configuration file. |
-| `CLIPROXYAPI_API_KEY` | Supplies a client key when Pi has no stored login credential. |
+| Setting                      | Behavior                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `CLIPROXYAPI_BASE_URL`       | Overrides `baseUrl` in the configuration file.                                                                    |
+| `CLIPROXYAPI_API_KEY`        | Supplies a client key when Pi has no stored login credential.                                                     |
 | `CLIPROXYAPI_MANAGEMENT_KEY` | Enables live Claude quota lookup through the same proxy's management API. Keep this separate from the client key. |
 
 Use an absolute URL. Root URLs and URLs ending in `/v1` or `/v1beta` work; the extension preserves path prefixes. Remote endpoints require HTTPS. HTTP works on loopback addresses. URLs cannot contain credentials, query strings, or fragments.
@@ -105,12 +105,12 @@ Generate a 1-second video of a red circle moving left with grok-imagine-video.
 Check video status for request_id <returned-id>.
 ```
 
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `cliproxyapi_media_models` | None | Available image/video IDs, supported output controls, and effective defaults. |
-| `cliproxyapi_generate_image` | `prompt`; optional `model`, `size`, `resolution`, `aspect_ratio` | Saved images and paths, plus previews when the chat model supports images. |
-| `cliproxyapi_generate_video` | `prompt`; optional `model`, `resolution`, `aspect_ratio`, and integer `duration` from 1 to 15 seconds | A `request_id` for the submitted video. |
-| `cliproxyapi_video_status` | `request_id` | One status check: pending, completed with a URL, or failed. |
+| Tool                         | Arguments                                                                                             | Result                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `cliproxyapi_media_models`   | None                                                                                                  | Available image/video IDs, supported output controls, and effective defaults. |
+| `cliproxyapi_generate_image` | `prompt`; optional `model`, `size`, `resolution`, `aspect_ratio`                                      | Saved images and paths, plus previews when the chat model supports images.    |
+| `cliproxyapi_generate_video` | `prompt`; optional `model`, `resolution`, `aspect_ratio`, and integer `duration` from 1 to 15 seconds | A `request_id` for the submitted video.                                       |
+| `cliproxyapi_video_status`   | `request_id`                                                                                          | One status check: pending, completed with a URL, or failed.                   |
 
 Pass `model` to choose an exact ID for one tool call. Otherwise, the tool uses its saved `/cli:model` selection. Without either, eligible OpenAI/GPT chats default to `gpt-image-2.5-sunburst` for images. Other chats need an image selection or explicit ID. Videos need a selection or explicit ID.
 
@@ -124,12 +124,12 @@ Invalid or disabled saved selections block automatic fallback until you clear or
 
 Pass output controls for each generation, or omit them to keep the backend defaults. `cliproxyapi_media_models` lists each model's `controls.size`, `controls.resolution`, and `controls.aspect_ratio`. Empty lists mean the control is unsupported; `size_limits` describes custom pixel sizes beyond the listed presets.
 
-| Models | Controls |
-| --- | --- |
-| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`. |
-| Gemini images | `aspect_ratio` and model-specific `resolution` tiers. |
-| xAI images | `resolution`: `1k` or `2k`, plus `aspect_ratio`. |
-| xAI videos | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model and its preview alias also accept `1080p`. |
+| Models        | Controls                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------- |
+| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`.                                 |
+| Gemini images | `aspect_ratio` and model-specific `resolution` tiers.                                                         |
+| xAI images    | `resolution`: `1k` or `2k`, plus `aspect_ratio`.                                                              |
+| xAI videos    | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model and its preview alias also accept `1080p`. |
 
 GPT Image 1.5 accepts `auto`, `1024x1024`, `1536x1024`, and `1024x1536`. GPT Image 2 and 2.5 also accept custom dimensions: both edges must be multiples of 16 and at most 3840 pixels. The longer edge cannot exceed three times the shorter one. Total pixels must be between 655,360 and 8,294,400. OpenAI marks resolutions above `2560x1440` as experimental.
 
@@ -151,11 +151,11 @@ Control values follow the [OpenAI image guide](https://developers.openai.com/api
 
 Your proxy must advertise the exact ID for a model to be available.
 
-| Provider | Models |
-| --- | --- |
-| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5` |
-| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image` |
-| xAI models | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
+| Provider      | Models                                                                                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5`                                                               |
+| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image`                                                        |
+| xAI models    | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
 
 Supported media IDs can also use advertised `api/` and `oauth/` credential routes. Gemini image models also support `vertex/` and `antigravity/` backend routes. Those backend prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, nested prefixes, media aliases, unknown media IDs, Google Veo, and editing endpoints are unsupported.
 
@@ -179,13 +179,13 @@ Gemini responses must contain one completed candidate. The extension skips thoug
 
 Video submission returns a request ID without waiting for generation. Call `cliproxyapi_video_status` with that ID for each later check. Upstream `done` maps to completed; `failed`, `expired`, and moderation-rejected results map to failed. The extension omits URLs for moderation failures. It returns successful video URLs without downloading them or sending proxy credentials to them. xAI video URLs are temporary.
 
-| Operation | Deadline | Response limit |
-| --- | --- | --- |
-| Catalog fetch | 10 seconds | 4 MiB |
+| Operation                     | Deadline   | Response limit                                 |
+| ----------------------------- | ---------- | ---------------------------------------------- |
+| Catalog fetch                 | 10 seconds | 4 MiB                                          |
 | Media listing or video status | 15 seconds | 4 MiB for the catalog; 64 KiB for video status |
-| OpenAI image generation | 10 minutes | 32 MiB |
-| Other image generation | 3 minutes | 32 MiB |
-| Video submission | 60 seconds | 64 KiB |
+| OpenAI image generation       | 10 minutes | 32 MiB                                         |
+| Other image generation        | 3 minutes  | 32 MiB                                         |
+| Video submission              | 60 seconds | 64 KiB                                         |
 
 Media deadlines include authentication and network waits. Discovery and media requests reject redirects and report HTTP errors without upstream response bodies.
 
