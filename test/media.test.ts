@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { once } from "node:events";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, readdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { type ClientRequest, createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
@@ -1645,6 +1646,251 @@ test("unsupported output controls fail before auth, discovery, generation, or fi
     }
   }
   assert.deepEqual(await readdir(ctx.cwd), []);
+});
+
+test("OpenAI controls preserve quality, transparency, compression, and exact API-key image count", async (t) => {
+  const model = "api/gpt-image-2.5-sunburst";
+  const requests: unknown[] = [];
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET") return void res.end(JSON.stringify({ data: [{ id: model }] }));
+      assert.equal(req.url, "/v1/images/generations");
+      void body(req).then((value) => {
+        requests.push(value);
+        res.end(JSON.stringify({ data: [{ b64_json: webp }, { b64_json: png }] }));
+      });
+    }),
+  });
+  const ctx = context(await home(t));
+  const params = {
+    model,
+    prompt: "fixture",
+    size: "2048x2048",
+    quality: "max",
+    background: "transparent",
+    output_format: "webp",
+    output_compression: 0,
+    moderation: "auto",
+    n: 2,
+  };
+  const result = await generateImage(config, params, ctx);
+  assert.deepEqual(requests, [params]);
+  assert.equal(result.details.files.length, 2);
+  assert.deepEqual(
+    result.details.files.map((file) => file.mimeType),
+    ["image/webp", "image/png"],
+  );
+  assert.deepEqual(mediaControls(model).quality, ["auto", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(mediaControls("api/gpt-image-1.5").input_fidelity, ["low", "high"]);
+  assert.deepEqual(mediaControls(model).input_fidelity, []);
+});
+
+test("OpenAI editing uploads bounded local files and a mask to the exact edit route without changing inputs", async (t) => {
+  const model = "api/gpt-image-1.5";
+  let posted: unknown;
+  const config = parseConfig({
+    baseUrl: `${await server(t, (req, res) => {
+      assert.equal(req.headers.authorization, `Bearer ${key}`);
+      if (req.method === "GET") return void res.end(JSON.stringify({ data: [{ id: model }] }));
+      assert.equal(req.url, "/gateway/v1/images/edits");
+      assert.equal(req.headers["content-type"], "application/json");
+      void body(req).then((value) => {
+        posted = value;
+        res.end(JSON.stringify({ data: [{ b64_json: png }] }));
+      });
+    })}/gateway`,
+  });
+  const ctx = context(await home(t));
+  const files = [
+    ["source.png", png],
+    ["reference.jpg", jpeg],
+    ["mask.png", png],
+  ];
+  for (const [name, data] of files) await writeFile(join(ctx.cwd, name), Buffer.from(data, "base64"));
+  const progress: string[] = [];
+  await generateImage(
+    config,
+    {
+      model,
+      prompt: "fixture",
+      images: ["source.png", join(ctx.cwd, "reference.jpg")],
+      mask: "mask.png",
+      input_fidelity: "high",
+      quality: "high",
+    },
+    ctx,
+    undefined,
+    (text) => progress.push(text),
+  );
+  assert.deepEqual(posted, {
+    model,
+    prompt: "fixture",
+    n: 1,
+    quality: "high",
+    input_fidelity: "high",
+    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${jpeg}` }],
+    mask: { image_url: `data:image/png;base64,${png}` },
+  });
+  assert.deepEqual(progress, ["Editing image...", "Saving image..."]);
+  for (const [name, data] of files)
+    assert.equal((await readFile(join(ctx.cwd, name))).toString("base64"), data);
+});
+
+test("invalid OpenAI controls and edit inputs fail before authentication or network access", async (t) => {
+  const config = parseConfig({});
+  const ctx = {
+    ...context(await home(t)),
+    modelRegistry: { getProviderAuth: t.mock.fn(async () => ({ auth: { apiKey: key } })) },
+  };
+  const network = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  for (const params of [
+    { quality: "ultra" },
+    { model: "gpt-image-1.5", quality: "max" },
+    { output_format: "gif" },
+    { background: "transparent", output_format: "jpeg" },
+    { output_compression: 80 },
+    { output_format: "png", output_compression: 80 },
+    { output_format: "webp", output_compression: -1 },
+    { output_format: "jpeg", output_compression: 101 },
+    { output_format: "webp", output_compression: 1.5 },
+    { moderation: "disabled" },
+    { n: 0 },
+    { n: 11 },
+    { n: 1.5 },
+    { model: "gpt-image-2", n: 2 },
+    { model: "oauth/gpt-image-2", n: 2 },
+    { model: imageModel, quality: "high" },
+    { model: "gemini-3-pro-image", images: ["source.png"] },
+    { mask: "mask.png" },
+    { images: [] },
+    { images: Array(17).fill("source.png") },
+    { images: ["https://must-not-contact.example/source.png"] },
+    { images: [""] },
+    { images: ["."] },
+    { images: ["missing.png"] },
+    { input_fidelity: "high" },
+    { images: ["source.png"], input_fidelity: "high" },
+    { prompt: "x".repeat(32001) },
+  ])
+    await assert.rejects(
+      generateImage(config, { model: "api/gpt-image-2.5-sunburst", prompt: "fixture", ...params }, ctx),
+    );
+  await writeFile(join(ctx.cwd, "source.png"), Buffer.from(png, "base64"));
+  await writeFile(join(ctx.cwd, "invalid.png"), "not an image");
+  const wrongSize = Buffer.from(png, "base64");
+  wrongSize.writeUInt32BE(2, 16);
+  await writeFile(join(ctx.cwd, "wrong-size.png"), wrongSize);
+  const noAlpha = Buffer.from(png, "base64");
+  noAlpha[25] = 2;
+  await writeFile(join(ctx.cwd, "no-alpha.png"), noAlpha);
+  for (const mask of ["invalid.png", "wrong-size.png", "no-alpha.png"])
+    await assert.rejects(
+      generateImage(
+        config,
+        { model: "api/gpt-image-2", prompt: "fixture", images: ["source.png"], mask },
+        ctx,
+      ),
+    );
+  await assert.rejects(
+    generateImage(config, { model: "api/gpt-image-2", prompt: "fixture", images: ["invalid.png"] }, ctx),
+  );
+  await truncate(join(ctx.cwd, "source.png"), 14 * 1024 * 1024 + 1);
+  await assert.rejects(
+    generateImage(config, { model: "api/gpt-image-2", prompt: "fixture", images: ["source.png"] }, ctx),
+    /limits/,
+  );
+  await truncate(join(ctx.cwd, "source.png"), 11 * 1024 * 1024);
+  await assert.rejects(
+    generateImage(
+      config,
+      { model: "api/gpt-image-2", prompt: "fixture", images: ["source.png", "source.png"] },
+      ctx,
+    ),
+    /limits/,
+  );
+  assert.equal(ctx.modelRegistry.getProviderAuth.mock.callCount(), 0);
+  assert.equal(network.mock.callCount(), 0);
+  assert.ok(!(await readdir(ctx.cwd)).includes(".pi"));
+});
+
+test("cancellation during edit-file reading closes the file before authentication", async (t) => {
+  const ctx = {
+    ...context(await home(t)),
+    modelRegistry: { getProviderAuth: t.mock.fn(async () => ({ auth: { apiKey: key } })) },
+  };
+  await writeFile(
+    join(ctx.cwd, "source.png"),
+    Buffer.concat([Buffer.from(png, "base64"), Buffer.alloc(128 * 1024)]),
+  );
+  const network = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  const controller = new AbortController();
+  const original = fs.open;
+  let opened: Awaited<ReturnType<typeof fs.open>> | undefined;
+  const mocked = t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+    const file = await original(...args);
+    opened = file;
+    const stream = file.createReadStream.bind(file);
+    t.mock.method(file, "createReadStream", (...options: Parameters<typeof file.createReadStream>) => {
+      const input = stream(...options);
+      input.once("data", () => controller.abort());
+      return input;
+    });
+    return file;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      generateImage(
+        parseConfig({}),
+        { model: "api/gpt-image-2", prompt: "fixture", images: ["source.png"] },
+        ctx,
+        controller.signal,
+      ),
+    );
+    assert.ok(controller.signal.aborted);
+    assert.ok(opened);
+    assert.equal(opened.fd, -1);
+    assert.equal(ctx.modelRegistry.getProviderAuth.mock.callCount(), 0);
+    assert.equal(network.mock.callCount(), 0);
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test("multi-image output cleans up a partial save and isolates concurrent generations", async (t) => {
+  const model = "api/gpt-image-2";
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) =>
+      res.end(
+        JSON.stringify(
+          req.method === "GET" ? { data: [{ id: model }] } : { data: [{ b64_json: png }, { b64_json: png }] },
+        ),
+      ),
+    ),
+  });
+  const ctx = context(await home(t));
+  const params = { model, prompt: "fixture", n: 2 };
+  const original = fs.writeFile;
+  let writes = 0;
+  const mocked = t.mock.method(fs, "writeFile", (...args: Parameters<typeof fs.writeFile>) => {
+    if (++writes === 2) return Promise.reject(new Error("Fixture write failure"));
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(generateImage(config, params, ctx), /could not save/);
+    assert.equal(writes, 2);
+    assert.deepEqual(await readdir(join(ctx.cwd, ".pi")), []);
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+  const results = await Promise.all([generateImage(config, params, ctx), generateImage(config, params, ctx)]);
+  const files = results.flatMap((result) => result.details.files);
+  assert.equal(new Set(files.map((file) => file.path)).size, 4);
+  assert.equal((await readdir(join(ctx.cwd, ".pi"))).length, 2);
+  for (const file of files) assert.equal((await readFile(file.path)).toString("base64"), png);
 });
 
 test("OpenAI caller cancellation and overall timeout destroy an incoming body after partial data", {

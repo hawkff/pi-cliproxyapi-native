@@ -114,7 +114,8 @@ export function mediaPurpose(id: string) {
 
 export function mediaControls(id: string) {
   const capability = mediaCapability(id);
-  const { metadataId } = modelRoute(id);
+  const { metadataId, authType } = modelRoute(id);
+  const openai = capability?.route === "openai";
   const commonRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"];
   let resolution: string[] = [];
   let aspect_ratio: string[] = [];
@@ -144,6 +145,25 @@ export function mediaControls(id: string) {
         : undefined,
     resolution,
     aspect_ratio,
+    quality: openai
+      ? [
+          "auto",
+          "low",
+          "medium",
+          "high",
+          ...(/^gpt-image-2\.5-(sunburst|flare)$/.test(metadataId) ? ["xhigh", "max"] : []),
+        ]
+      : [],
+    background: openai ? ["auto", "opaque", "transparent"] : [],
+    output_format: openai ? ["png", "jpeg", "webp"] : [],
+    output_compression: openai ? { min: 0, max: 100, formats: ["jpeg", "webp"] } : undefined,
+    moderation: openai ? ["auto", "low"] : [],
+    // Subscription image-tool translation does not forward n.
+    n: openai ? { min: 1, max: authType === "api-key" ? 10 : 1 } : undefined,
+    editing: openai
+      ? { max_images: 16, max_file_bytes: 14 * 1024 * 1024, max_total_bytes: 20 * 1024 * 1024, mask: "png" }
+      : undefined,
+    input_fidelity: openai && metadataId === "gpt-image-1.5" ? ["low", "high"] : [],
   };
 }
 
