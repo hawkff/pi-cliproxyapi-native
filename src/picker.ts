@@ -212,6 +212,15 @@ export class ModelPicker extends Container implements Focusable {
 
 export function registerModelPicker(pi: ExtensionAPI, config: Config) {
   let commandSequence = 0;
+  let navigation = 0;
+  const invalidate = () => {
+    navigation++;
+  };
+  pi.on("session_before_switch", invalidate);
+  pi.on("session_before_fork", invalidate);
+  pi.on("session_before_tree", invalidate);
+  pi.on("session_start", invalidate);
+  pi.on("session_shutdown", invalidate);
   const savedSequence = { image: 0, video: 0 };
   pi.registerCommand("cli:model", {
     description: "Search CLIProxyAPI image/video models and select a session media default",
@@ -221,7 +230,9 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         .map((value) => ({ value, label: value })),
     async handler(args, ctx) {
       const sequence = ++commandSequence;
+      const generation = navigation;
       const report = (content: string, error = false) => {
+        if (generation !== navigation) return;
         if (ctx.hasUI) ctx.ui.notify(content, error ? "error" : "info");
         else if (ctx.mode === "print") console.error(content);
         else
@@ -233,6 +244,7 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
       try {
         const input = args.trim();
         const save = (choice: string) => {
+          if (generation !== navigation) return;
           const clearing = clearedPurpose(choice);
           const capability = clearing ? undefined : mediaCapability(choice);
           const purpose = clearing ?? capability?.purpose;
@@ -265,6 +277,7 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         const signal = deadline(ctx.signal, 15000);
         const key = await mediaKey(ctx, signal);
         const rows = pickerCatalog(await fetchCatalog(config, key, signal));
+        if (generation !== navigation) return;
         const { defaults, automatic } = effectiveMediaDefaults(config, ctx);
         const items = pickerItems(rows, defaults);
         const query = input === "list" ? "" : input.startsWith("search ") ? input.slice(7) : input;

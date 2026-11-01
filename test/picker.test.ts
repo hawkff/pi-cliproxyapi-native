@@ -410,7 +410,7 @@ test("media selection uses only GETs, restores branch defaults, and never change
   } as unknown as ExtensionCommandContext;
   registerModelPicker(pi, config);
   assert.equal(gets, 0);
-  assert.equal(hooks, 0);
+  assert.equal(hooks, 5);
   assert.ok(command);
   await command.handler("", ctx);
   assert.match(notifications.at(-1) ?? "", /Nano Banana.*antigravity.*image/);
@@ -515,6 +515,7 @@ test("picker saves follow successful command order per purpose across deferred d
       });
       let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
       const pi = {
+        on(_event: string, _handler: (event: unknown, ctx: ExtensionContext) => void) {},
         registerCommand(_name, options) {
           command = options;
         },
@@ -572,6 +573,73 @@ test("picker saves follow successful command order per purpose across deferred d
       }
       assert.equal(requests, immediate ? 1 : 2);
     });
+  }
+});
+
+test("pending picker commands cannot save or notify after session navigation", async (t) => {
+  for (const phase of ["discovery", "picker"]) {
+    for (const event of [
+      "session_before_switch",
+      "session_before_fork",
+      "session_before_tree",
+      "session_start",
+      "session_shutdown",
+    ]) {
+      const hooks = new Map<string, () => void>();
+      const gate = Promise.withResolvers<void>();
+      const started = Promise.withResolvers<void>();
+      const sessionManager = SessionManager.inMemory();
+      const oldBranch = sessionManager.appendCustomEntry("fixture", {});
+      let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
+      const notifications: string[] = [];
+      const config = parseConfig({});
+      const pi = {
+        on(name: string, handler: () => void) {
+          hooks.set(name, handler);
+        },
+        registerCommand(_name, options) {
+          command = options;
+        },
+        appendEntry(type, data) {
+          sessionManager.appendCustomEntry(type, data);
+        },
+      } as ExtensionAPI;
+      t.mock.method(globalThis, "fetch", async () => {
+        if (phase === "discovery") {
+          started.resolve();
+          await gate.promise;
+        }
+        return Response.json(catalog);
+      });
+      const ctx = {
+        mode: "tui",
+        hasUI: true,
+        sessionManager,
+        ui: {
+          notify: (text: string) => notifications.push(text),
+          custom: async () => {
+            started.resolve();
+            await gate.promise;
+            return image;
+          },
+        },
+        modelRegistry: { getProviderAuth: async () => ({ auth: { apiKey: "fixture" } }) },
+      } as unknown as ExtensionCommandContext;
+      registerModelPicker(pi, config);
+      assert.ok(command);
+      const pending = command.handler(phase === "discovery" ? `select ${image}` : "", ctx);
+      await started.promise;
+      hooks.get(event)?.();
+      sessionManager.branch(oldBranch);
+      const leaf = sessionManager.appendCustomEntry("fixture", { branch: "new" });
+      gate.resolve();
+      await pending;
+      assert.equal(sessionManager.getLeafId(), leaf);
+      assert.deepEqual(readMediaDefaults(config, ctx), {});
+      assert.deepEqual(notifications, []);
+      await command.handler(`select ${video}`, ctx);
+      assert.deepEqual(readMediaDefaults(config, ctx), { video });
+    }
   }
 });
 
@@ -744,6 +812,7 @@ test("media picker preserves distinct backend routes and rejects chat, unknown a
   const notifications: string[] = [];
   let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
   const pi = {
+    on(_event: string, _handler: (event: unknown, ctx: ExtensionContext) => void) {},
     registerCommand(_name, options) {
       command = options;
     },
@@ -945,7 +1014,7 @@ test("media picker and listings show derived defaults without footer output or u
   } as unknown as ExtensionCommandContext;
   registerModelPicker(pi, config);
   assert.ok(command);
-  assert.equal(hooks, 0);
+  assert.equal(hooks, 5);
   assert.deepEqual(output, []);
   assert.equal(gets, 0);
   assert.deepEqual(sessionManager.getBranch(), []);

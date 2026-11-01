@@ -19,7 +19,12 @@ test("auth-prefixed media retains its execution route, controls and searchable l
     );
     for (const [index, id] of ids.entries()) {
       assert.equal(mediaCapability(id)?.route, mediaCapability(mediaIds[index])?.route);
-      assert.deepEqual(mediaControls(id), mediaControls(mediaIds[index]));
+      const controls = mediaControls(id);
+      const bare = mediaControls(mediaIds[index]);
+      assert.deepEqual(controls, {
+        ...bare,
+        n: bare.n ? { min: 1, max: prefix === "api" ? 10 : 1 } : undefined,
+      });
       assert.match(models[index].name, prefix === "api" ? / · API key$/ : / · OAuth$/);
     }
     const rows = pickerCatalog(catalog);

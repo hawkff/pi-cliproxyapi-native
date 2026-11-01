@@ -1,7 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import * as http from "node:http";
 import * as https from "node:https";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { addAbortSignal, Readable } from "node:stream";
 import { type ImageContent, type Static, type TextContent, Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -49,6 +50,55 @@ const outputParameters = {
 const imageParameters = Type.Object({
   ...generationParameters.properties,
   ...outputParameters,
+  quality: Type.Optional(
+    Type.String({
+      description: "OpenAI quality from controls.quality; Sunburst and Flare also support xhigh and max.",
+    }),
+  ),
+  background: Type.Optional(
+    Type.String({
+      description: "OpenAI background: auto, opaque, or transparent. Transparency requires PNG or WebP.",
+    }),
+  ),
+  output_format: Type.Optional(
+    Type.String({ description: "OpenAI output format: png, jpeg, or webp. Omit for the backend default." }),
+  ),
+  output_compression: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      maximum: 100,
+      description: "OpenAI JPEG/WebP compression, 0–100. Requires an explicit jpeg or webp output_format.",
+    }),
+  ),
+  moderation: Type.Optional(Type.String({ description: "OpenAI moderation: auto or low." })),
+  n: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 10,
+      description:
+        "OpenAI image count. Values above 1 require an explicit api/ route; see controls.n. Default 1.",
+    }),
+  ),
+  images: Type.Optional(
+    Type.Array(Type.String({ minLength: 1 }), {
+      minItems: 1,
+      maxItems: 16,
+      description:
+        "OpenAI editing: local PNG/JPEG/WebP paths, relative to the working directory or absolute. Uploads these files; no URLs. Max 14 MiB each and 20 MiB total including mask. Omit to generate a new image.",
+    }),
+  ),
+  mask: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Optional local PNG mask for images[0]. The first image must also be PNG with matching dimensions; mask must have an alpha channel. Transparent regions are edited.",
+    }),
+  ),
+  input_fidelity: Type.Optional(
+    Type.String({
+      description: "Editing fidelity for GPT Image 1.5 only: low or high. Omit for other models.",
+    }),
+  ),
   size: Type.Optional(
     Type.String({
       minLength: 1,
@@ -67,13 +117,30 @@ const videoParameters = Type.Object({
   ),
 });
 
-function mediaOutputOptions(
-  model: string,
-  params: Pick<Static<typeof imageParameters>, "size" | "resolution" | "aspect_ratio">,
-) {
-  const options = { size: params.size, resolution: params.resolution, aspect_ratio: params.aspect_ratio };
+function mediaOutputOptions(model: string, params: Partial<Static<typeof imageParameters>>) {
+  const options = {
+    size: params.size,
+    resolution: params.resolution,
+    aspect_ratio: params.aspect_ratio,
+    quality: params.quality,
+    background: params.background,
+    output_format: params.output_format,
+    output_compression: params.output_compression,
+    moderation: params.moderation,
+    n: params.n,
+    input_fidelity: params.input_fidelity,
+  };
   const controls = mediaControls(model);
-  for (const field of ["size", "resolution", "aspect_ratio"] as const) {
+  for (const field of [
+    "size",
+    "resolution",
+    "aspect_ratio",
+    "quality",
+    "background",
+    "output_format",
+    "moderation",
+    "input_fidelity",
+  ] as const) {
     const value = options[field];
     if (value === undefined) continue;
     if (typeof value === "string" && controls[field].includes(value)) continue;
@@ -99,7 +166,111 @@ function mediaOutputOptions(
       `CLIProxyAPI ${field} is unsupported for ${model}. See cliproxyapi_media_models for supported controls.`,
     );
   }
+  if (
+    options.n !== undefined &&
+    (!controls.n || !Number.isInteger(options.n) || options.n < controls.n.min || options.n > controls.n.max)
+  )
+    throw new Error("CLIProxyAPI n is unsupported for this route. Use an api/ image model for 2–10 images.");
+  if (
+    options.output_compression !== undefined &&
+    (!controls.output_compression ||
+      !Number.isInteger(options.output_compression) ||
+      options.output_compression < 0 ||
+      options.output_compression > 100 ||
+      !controls.output_compression.formats.includes(options.output_format ?? ""))
+  )
+    throw new Error(
+      "CLIProxyAPI output_compression requires jpeg or webp output_format and an integer from 0 to 100.",
+    );
+  if (options.background === "transparent" && options.output_format === "jpeg")
+    throw new Error("CLIProxyAPI transparent backgrounds require png or webp output_format.");
+  if (options.input_fidelity !== undefined && params.images === undefined)
+    throw new Error("CLIProxyAPI input_fidelity requires editing images.");
   return options;
+}
+
+async function imageInputs(
+  model: string,
+  params: Static<typeof imageParameters>,
+  cwd: string,
+  signal: AbortSignal,
+) {
+  if (params.images === undefined) {
+    if (params.mask !== undefined) throw new Error("CLIProxyAPI mask requires editing images.");
+    return {};
+  }
+  const limits = mediaControls(model).editing;
+  if (
+    !limits ||
+    !Array.isArray(params.images) ||
+    params.images.length < 1 ||
+    params.images.length > limits.max_images
+  )
+    throw new Error("CLIProxyAPI editing requires 1–16 local images and a supported OpenAI image model.");
+  const images: { image_url: string }[] = [];
+  let mask: { image_url: string } | undefined;
+  let firstPngDimensions: Buffer | undefined;
+  let total = 0;
+  for (const [index, path] of [
+    ...params.images,
+    ...(params.mask === undefined ? [] : [params.mask]),
+  ].entries()) {
+    signal.throwIfAborted();
+    if (
+      typeof path !== "string" ||
+      !path.trim() ||
+      path.includes("\0") ||
+      /^[a-z][a-z\d+.-]*:\/\//i.test(path)
+    )
+      throw new Error("CLIProxyAPI editing accepts local image paths, not URLs.");
+    // Nonblocking open prevents FIFOs from hanging before the regular-file check.
+    const file = await open(resolve(cwd, path), constants.O_RDONLY | constants.O_NONBLOCK);
+    let bytes: Buffer;
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > limits.max_file_bytes || total + info.size > limits.max_total_bytes)
+        throw new Error(
+          "CLIProxyAPI editing requires regular files within the 14 MiB/file and 20 MiB total limits.",
+        );
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of file.createReadStream({
+        signal,
+        highWaterMark: 64 * 1024,
+        autoClose: false,
+      })) {
+        size += chunk.length;
+        total += chunk.length;
+        if (size > limits.max_file_bytes || total > limits.max_total_bytes)
+          throw new Error("CLIProxyAPI editing input exceeds the upload size limit.");
+        chunks.push(chunk);
+      }
+      bytes = Buffer.concat(chunks, size);
+    } finally {
+      await file.close();
+    }
+    let mimeType: string;
+    try {
+      ({ mimeType } = imageType(bytes));
+    } catch {
+      throw new Error(`CLIProxyAPI editing input "${path}" is not a supported PNG, JPEG, or WebP image.`);
+    }
+    const isMask = index === params.images.length;
+    if (index === 0 && mimeType === "image/png") firstPngDimensions = bytes.subarray(16, 24);
+    if (
+      isMask &&
+      (mimeType !== "image/png" ||
+        !firstPngDimensions?.equals(bytes.subarray(16, 24)) ||
+        ![4, 6].includes(bytes[25]))
+    )
+      throw new Error(
+        "CLIProxyAPI mask and first image must be matching-size PNGs; the mask needs an alpha channel.",
+      );
+    const input = { image_url: `data:${mimeType};base64,${bytes.toString("base64")}` };
+    if (isMask) mask = input;
+    else images.push(input);
+  }
+  return { images, mask };
 }
 
 export async function mediaKey(ctx: Pick<MediaContext, "modelRegistry">, signal: AbortSignal) {
@@ -125,10 +296,10 @@ export async function mediaKey(ctx: Pick<MediaContext, "modelRegistry">, signal:
   }
 }
 
-function openaiImageResponse(config: Config, key: string, body: object, signal: AbortSignal) {
+function openaiImageResponse(config: Config, key: string, path: string, body: object, signal: AbortSignal) {
   return new Promise<{ ok: boolean; status: number; body: ReturnType<typeof Readable.toWeb> | null }>(
     (resolve, reject) => {
-      const url = new URL(`${config.baseUrl}/v1/images/generations`);
+      const url = new URL(`${config.baseUrl}/${path}`);
       const transport = url.protocol === "https:" ? https : http;
       const options = "options" in transport.globalAgent ? transport.globalAgent.options : undefined;
       // Preserve configured proxies without inheriting the global agent's socket timeout.
@@ -198,7 +369,7 @@ async function mediaRequest(
   try {
     response =
       openaiImage && body
-        ? await openaiImageResponse(config, key, body, signal)
+        ? await openaiImageResponse(config, key, path, body, signal)
         : await fetch(`${config.baseUrl}/${path}`, {
             method: body ? "POST" : "GET",
             headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -264,19 +435,7 @@ async function generationKey(
   return key;
 }
 
-function parseImage(value: unknown) {
-  if (!isRecord(value) || !Array.isArray(value.data) || value.data.length !== 1) {
-    throw new Error("CLIProxyAPI image response must contain one image.");
-  }
-  const entry: unknown = value.data[0];
-  if (!isRecord(entry) || typeof entry.b64_json !== "string") {
-    throw new Error("CLIProxyAPI did not return b64_json image data. URL-only images are not downloaded.");
-  }
-  const encoded = entry.b64_json;
-  const bytes = Buffer.from(encoded, "base64");
-  if (!encoded || bytes.toString("base64") !== encoded) {
-    throw new Error("CLIProxyAPI returned invalid base64 image data.");
-  }
+function imageType(bytes: Buffer) {
   let extension: string;
   let mimeType: string;
   if (
@@ -307,8 +466,32 @@ function parseImage(value: unknown) {
   } else {
     throw new Error("CLIProxyAPI returned an unsupported or malformed image; expected JPEG, PNG, or WebP.");
   }
+  return { extension, mimeType };
+}
+
+function parseImage(entry: unknown) {
+  if (!isRecord(entry) || typeof entry.b64_json !== "string") {
+    throw new Error("CLIProxyAPI did not return b64_json image data. URL-only images are not downloaded.");
+  }
+  const encoded = entry.b64_json;
+  const bytes = Buffer.from(encoded, "base64");
+  if (!encoded || bytes.toString("base64") !== encoded) {
+    throw new Error("CLIProxyAPI returned invalid base64 image data.");
+  }
+  const { extension, mimeType } = imageType(bytes);
   const image: ImageContent = { type: "image", data: encoded, mimeType };
   return { bytes, extension, image };
+}
+
+function parseImages(value: unknown, count: number) {
+  if (
+    !isRecord(value) ||
+    value.error !== undefined ||
+    !Array.isArray(value.data) ||
+    value.data.length !== count
+  )
+    throw new Error(`CLIProxyAPI image response must contain ${count} image(s).`);
+  return value.data.map(parseImage);
 }
 
 function parseGoogleImages(value: unknown) {
@@ -361,7 +544,7 @@ function parseGoogleImages(value: unknown) {
     if (part.thought === true) continue;
     if (part.inlineData !== undefined) {
       if (!isRecord(part.inlineData) || typeof part.inlineData.data !== "string") throw invalid();
-      const parsed = parseImage({ data: [{ b64_json: part.inlineData.data }] });
+      const parsed = parseImage({ b64_json: part.inlineData.data });
       if (part.inlineData.mimeType !== parsed.image.mimeType) throw invalid();
       images.push(parsed);
     } else if (typeof part.text !== "string") throw invalid();
@@ -380,15 +563,28 @@ export async function generateImage(
   const model = resolveMediaModel(config, ctx, "image", params.model);
   const route = mediaCapability(model)?.route;
   const output = mediaOutputOptions(model, params);
+  if (
+    typeof params.prompt !== "string" ||
+    !params.prompt.trim() ||
+    (route === "openai" && params.prompt.length > 32000)
+  )
+    throw new Error(
+      "CLIProxyAPI requires a non-empty prompt; OpenAI prompts are limited to 32000 characters.",
+    );
   const bounded = deadline(signal, route === "openai" ? 600000 : 180000);
+  const inputs = await imageInputs(model, params, ctx.cwd, bounded);
   const key = await generationKey(config, { ...params, model }, ctx, bounded);
   bounded.throwIfAborted();
-  onProgress?.("Generating image...");
+  onProgress?.(inputs.images ? "Editing image..." : "Generating image...");
   bounded.throwIfAborted();
   const result = await mediaRequest(
     config,
     key,
-    route === "gemini" ? `v1beta/models/${model}:generateContent` : "v1/images/generations",
+    route === "gemini"
+      ? `v1beta/models/${model}:generateContent`
+      : inputs.images
+        ? "v1/images/edits"
+        : "v1/images/generations",
     bounded,
     32 * 1024 * 1024,
     route === "xai"
@@ -401,7 +597,7 @@ export async function generateImage(
           aspect_ratio: output.aspect_ratio,
         }
       : route === "openai"
-        ? { model, prompt: params.prompt, n: 1, size: output.size }
+        ? { model, prompt: params.prompt, ...output, n: output.n ?? 1, ...inputs }
         : {
             contents: [{ role: "user", parts: [{ text: params.prompt }] }],
             generationConfig: {
@@ -414,7 +610,7 @@ export async function generateImage(
           },
     route === "openai",
   );
-  const images = route === "gemini" ? parseGoogleImages(result) : [parseImage(result)];
+  const images = route === "gemini" ? parseGoogleImages(result) : parseImages(result, output.n ?? 1);
   bounded.throwIfAborted();
   onProgress?.("Saving image...");
   bounded.throwIfAborted();
@@ -543,7 +739,7 @@ export function registerMediaTools(pi: ExtensionAPI, config: Config) {
     name: "cliproxyapi_generate_image",
     label: "CLIProxyAPI image",
     description:
-      "Generate images using an explicit available image model, a selected session default, or gpt-image-2.5-sunburst automatically for OpenAI/GPT chats. Saves each final image under a new .pi/ artifact directory and returns paths and previews for vision-capable chat models. Maximum response: 32 MiB; inline image base64: 4 MiB. Larger images return paths without previews. No automatic retries.",
+      "Generate images, or edit local images with OpenAI models by supplying images and an optional mask. Supports OpenAI size, quality, background, format/compression and image count from cliproxyapi_media_models. Uses the selected model or automatic OpenAI/GPT default without changing chat. Saves final images under a new .pi/ directory with optional previews. Maximum response: 32 MiB; inline base64: 4 MiB. No automatic retries.",
     promptSnippet: "Generate requested raster images through CLIProxyAPI using the effective image default.",
     promptGuidelines: [
       "Use cliproxyapi_generate_image for requested raster images. Omit model to use the effective default unless a specific image model is requested; keep the current chat model.",

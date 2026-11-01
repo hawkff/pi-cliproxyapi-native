@@ -1,6 +1,6 @@
 # Pi CLIProxyAPI Native
 
-Use [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for chat, image generation, and video generation in [Pi](https://pi.dev).
+Use [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for chat, image generation and editing, and video generation in [Pi](https://pi.dev).
 
 Chat uses Pi's native API adapters and model metadata, with availability from your proxy. Image and video tools have separate model selections, so you can generate media without switching your chat model.
 
@@ -12,6 +12,7 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
   - [Choose a media model](#choose-a-media-model)
   - [Generate media](#generate-media)
   - [Resolution and aspect ratio](#resolution-and-aspect-ratio)
+  - [OpenAI image controls and editing](#openai-image-controls-and-editing)
   - [Supported media models](#supported-media-models)
   - [Files, status, and limits](#files-status-and-limits)
 - [Chat models](#chat-models)
@@ -28,15 +29,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.38, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.48, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.0
+pi install npm:pi-cliproxyapi-native@0.3.1
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.0`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.1`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -62,10 +63,10 @@ Set `CLIPROXYAPI_BASE_URL` or create `~/.pi/agent/pi-cliproxyapi.json`:
 }
 ```
 
-| Setting | Behavior |
-| --- | --- |
-| `CLIPROXYAPI_BASE_URL` | Overrides `baseUrl` in the configuration file. |
-| `CLIPROXYAPI_API_KEY` | Supplies a client key when Pi has no stored login credential. |
+| Setting                      | Behavior                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `CLIPROXYAPI_BASE_URL`       | Overrides `baseUrl` in the configuration file.                                                                    |
+| `CLIPROXYAPI_API_KEY`        | Supplies a client key when Pi has no stored login credential.                                                     |
 | `CLIPROXYAPI_MANAGEMENT_KEY` | Enables live Claude quota lookup through the same proxy's management API. Keep this separate from the client key. |
 
 Use an absolute URL. Root URLs and URLs ending in `/v1` or `/v1beta` work; the extension preserves path prefixes. Remote endpoints require HTTPS. HTTP works on loopback addresses. URLs cannot contain credentials, query strings, or fragments.
@@ -92,6 +93,8 @@ Search by friendly name, exact ID, backend, owner, or image/video purpose. The p
 
 The terminal picker is keyboard-only. Type to search, use the selection keys to move, press Enter to select, or Escape to cancel. It respects custom selection keybindings. Mouse clicks and wheel events do not change selection.
 
+Starting session or branch navigation discards pending picker commands, even if another extension later cancels navigation. Run the selection again if you stay on the same branch.
+
 RPC, print, and JSON modes return text instead of opening the picker. Print mode uses stderr, JSON mode emits custom-message events, and RPC sends notifications. Listings show up to 100 matches; narrow larger lists with `search`. Use `select <exact ID>` to choose a model in these modes.
 
 ### Generate media
@@ -105,12 +108,12 @@ Generate a 1-second video of a red circle moving left with grok-imagine-video.
 Check video status for request_id <returned-id>.
 ```
 
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `cliproxyapi_media_models` | None | Available image/video IDs, supported output controls, and effective defaults. |
-| `cliproxyapi_generate_image` | `prompt`; optional `model`, `size`, `resolution`, `aspect_ratio` | Saved images and paths, plus previews when the chat model supports images. |
-| `cliproxyapi_generate_video` | `prompt`; optional `model`, `resolution`, `aspect_ratio`, and integer `duration` from 1 to 15 seconds | A `request_id` for the submitted video. |
-| `cliproxyapi_video_status` | `request_id` | One status check: pending, completed with a URL, or failed. |
+| Tool                         | Arguments                                                                                                                                      | Result                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `cliproxyapi_media_models`   | None                                                                                                                                           | Available image/video IDs, supported output controls, and effective defaults. |
+| `cliproxyapi_generate_image` | `prompt`; optional `model`, `size`, `resolution`, `aspect_ratio`, and [OpenAI controls and editing inputs](#openai-image-controls-and-editing) | Saved images and paths, plus previews when the chat model supports images.    |
+| `cliproxyapi_generate_video` | `prompt`; optional `model`, `resolution`, `aspect_ratio`, and integer `duration` from 1 to 15 seconds                                          | A `request_id` for the submitted video.                                       |
+| `cliproxyapi_video_status`   | `request_id`                                                                                                                                   | One status check: pending, completed with a URL, or failed.                   |
 
 Pass `model` to choose an exact ID for one tool call. Otherwise, the tool uses its saved `/cli:model` selection. Without either, eligible OpenAI/GPT chats default to `gpt-image-2.5-sunburst` for images. Other chats need an image selection or explicit ID. Videos need a selection or explicit ID.
 
@@ -124,12 +127,12 @@ Invalid or disabled saved selections block automatic fallback until you clear or
 
 Pass output controls for each generation, or omit them to keep the backend defaults. `cliproxyapi_media_models` lists each model's `controls.size`, `controls.resolution`, and `controls.aspect_ratio`. Empty lists mean the control is unsupported; `size_limits` describes custom pixel sizes beyond the listed presets.
 
-| Models | Controls |
-| --- | --- |
-| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`. |
-| Gemini images | `aspect_ratio` and model-specific `resolution` tiers. |
-| xAI images | `resolution`: `1k` or `2k`, plus `aspect_ratio`. |
-| xAI videos | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model and its preview alias also accept `1080p`. |
+| Models        | Controls                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------- |
+| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`.                                 |
+| Gemini images | `aspect_ratio` and model-specific `resolution` tiers.                                                         |
+| xAI images    | `resolution`: `1k` or `2k`, plus `aspect_ratio`.                                                              |
+| xAI videos    | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model and its preview alias also accept `1080p`. |
 
 GPT Image 1.5 accepts `auto`, `1024x1024`, `1536x1024`, and `1024x1536`. GPT Image 2 and 2.5 also accept custom dimensions: both edges must be multiples of 16 and at most 3840 pixels. The longer edge cannot exceed three times the shorter one. Total pixels must be between 655,360 and 8,294,400. OpenAI marks resolutions above `2560x1440` as experimental.
 
@@ -147,17 +150,44 @@ Larger outputs can increase generation cost and latency. The extension saves the
 
 Control values follow the [OpenAI image guide](https://developers.openai.com/api/docs/guides/image-generation#customize-image-output), [Gemini image guide](https://ai.google.dev/gemini-api/docs/generate-content/image-generation#aspect_ratios_and_image_size), and xAI's [image](https://docs.x.ai/developers/model-capabilities/images/generation#configuration) and [video](https://docs.x.ai/developers/model-capabilities/video/generation#configuration) documentation, restricted to what CLIProxyAPI forwards.
 
+### OpenAI image controls and editing
+
+Use `cliproxyapi_media_models` to inspect controls for the exact advertised model ID. Omitted options keep the backend defaults. The extension rejects unsupported values before contacting the proxy.
+
+| Option               | Supported values                                                                                                                                                            |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quality`            | `auto`, `low`, `medium`, `high`. Sunburst and Flare also accept `xhigh` and `max`.                                                                                          |
+| `background`         | `auto`, `opaque`, `transparent`. Transparent output requires PNG or WebP; GPT Image 2 transparency is in preview upstream.                                                  |
+| `output_format`      | `png`, `jpeg`, `webp`. JPEG and WebP can reduce file size and help keep results within the response limit.                                                                  |
+| `output_compression` | Integer from 0 to 100, with an explicit `jpeg` or `webp` format. Zero is a valid value.                                                                                     |
+| `moderation`         | `auto` or `low`. OpenAI still applies its content policies.                                                                                                                 |
+| `n`                  | Integer from 1 to 10 on an explicit `api/` image route. Other routes allow only 1 because subscription translation can drop the count.                                      |
+| `images`             | One to 16 local PNG, JPEG, or WebP paths. Supplying these selects `/v1/images/edits` instead of generation.                                                                 |
+| `mask`               | Optional local PNG mask. The first image must also be PNG with matching dimensions. The mask needs a grayscale-alpha or RGBA alpha channel; transparent regions mark edits. |
+| `input_fidelity`     | `low` or `high`, for GPT Image 1.5 editing only. Omit it for other models.                                                                                                  |
+
+Editing uploads the files you name to the configured proxy. Paths can be absolute or relative to the working directory. The extension accepts regular files, checks file signatures, and limits uploads to 14 MiB per file and 20 MiB total including the mask. It does not fetch input URLs, resize inputs, or modify source files. OpenAI performs full image decoding and validates the edit. These local limits keep base64 uploads bounded and may be lower than upstream limits.
+
+```text
+Generate two images with api/gpt-image-2.5-sunburst at 1536x864, quality max, output_format webp, output_compression 85.
+Edit ./photo.png with api/gpt-image-2.5-flare: replace the background with a garden, using ./mask.png as the mask.
+```
+
+All returned images share the existing 32 MiB response limit and 4 MiB preview budget. Larger sizes, higher quality, and multiple images can increase cost and latency. Use fewer images or JPEG/WebP if the response exceeds the limit. Generation and editing do not retry after a failure.
+
+The extension supports the verified options above, not a general OpenAI API passthrough. Streaming image previews, remote file IDs, annotation markup, audio, batches, and realtime APIs are not exposed. Adding an upstream API key does not enable endpoints that the proxy or extension cannot handle.
+
 ### Supported media models
 
 Your proxy must advertise the exact ID for a model to be available.
 
-| Provider | Models |
-| --- | --- |
-| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5` |
-| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image` |
-| xAI models | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
+| Provider      | Models                                                                                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5`                                                               |
+| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image`                                                        |
+| xAI models    | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
 
-Supported media IDs can also use advertised `api/` and `oauth/` credential routes. Gemini image models also support `vertex/` and `antigravity/` backend routes. Those backend prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, nested prefixes, media aliases, unknown media IDs, Google Veo, and editing endpoints are unsupported.
+Supported media IDs can also use advertised `api/` and `oauth/` credential routes. Gemini image models also support `vertex/` and `antigravity/` backend routes. Those backend prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, nested prefixes, media aliases, unknown media IDs, Google Veo, and non-OpenAI editing are unsupported.
 
 The extension disables these retired Imagen IDs, including their supported prefixed forms:
 
@@ -179,15 +209,15 @@ Gemini responses must contain one completed candidate. The extension skips thoug
 
 Video submission returns a request ID without waiting for generation. Call `cliproxyapi_video_status` with that ID for each later check. Upstream `done` maps to completed; `failed`, `expired`, and moderation-rejected results map to failed. The extension omits URLs for moderation failures. It returns successful video URLs without downloading them or sending proxy credentials to them. xAI video URLs are temporary.
 
-| Operation | Deadline | Response limit |
-| --- | --- | --- |
-| Catalog fetch | 10 seconds | 4 MiB |
-| Media listing or video status | 15 seconds | 4 MiB for the catalog; 64 KiB for video status |
-| OpenAI image generation | 10 minutes | 32 MiB |
-| Other image generation | 3 minutes | 32 MiB |
-| Video submission | 60 seconds | 64 KiB |
+| Operation                          | Deadline   | Response limit                                 |
+| ---------------------------------- | ---------- | ---------------------------------------------- |
+| Catalog fetch                      | 10 seconds | 4 MiB                                          |
+| Media listing or video status      | 15 seconds | 4 MiB for the catalog; 64 KiB for video status |
+| OpenAI image generation or editing | 10 minutes | 32 MiB                                         |
+| Other image generation             | 3 minutes  | 32 MiB                                         |
+| Video submission                   | 60 seconds | 64 KiB                                         |
 
-Media deadlines include authentication and network waits. Discovery and media requests reject redirects and report HTTP errors without upstream response bodies.
+Media deadlines include input-file reads, authentication, and network waits. Discovery and media requests reject redirects and report HTTP errors without upstream response bodies.
 
 The media tools do not retry generation. Cancellation or timeout can leave work running upstream. Check a known video request ID before submitting another generation.
 
@@ -331,11 +361,11 @@ Run `/reload` after changing settings and `/cliproxyapi-refresh` before starting
 
 Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields. The extension disables unverified deferred-tool and strict-tool capabilities. Responses function tools use `strict: null` when Pi omits strictness, so optional arguments remain optional. Explicit payload hooks retain final control.
 
-OpenAI images POST `model`, `prompt`, and `n=1` to `/v1/images/generations`, without `response_format`. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
+OpenAI images POST `model`, `prompt`, `n`, and supplied controls to `/v1/images/generations`, without `response_format`. Editing uses `/v1/images/edits` with JSON `images` and optional `mask` data URLs. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
 
 OpenAI image POSTs use a dedicated HTTP connection and preserve Node's configured proxy routing. They disable socket timeouts so the ten-minute deadline controls the request, request identity encoding, and reject compressed responses.
 
-The implementation follows CLIProxyAPI v7.3.1's [OpenAI image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.3.1/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.3.1/internal/runtime/executor/codex_openai_images.go). The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
+The OpenAI image implementation follows CLIProxyAPI v8.0.48's [image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.48/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.48/internal/runtime/executor/codex_openai_images.go), plus the OpenAI [generation](https://developers.openai.com/api/reference/resources/images/methods/generate) and [editing](https://developers.openai.com/api/reference/resources/images/methods/edit) references. The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
 
 ## License
 
