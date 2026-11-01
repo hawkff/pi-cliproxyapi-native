@@ -332,6 +332,14 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       skipped.add(entry.id);
       continue;
     }
+    // OpenAI API keys reach OpenAI through CLIProxyAPI's Codex executor, which forwards strict and
+    // grammar tools, additional_tools, and mid-conversation instructions (live-checked on 8.0.48).
+    // OpenAI-compatible providers report their own owner, so the api/ prefix alone does not qualify.
+    const openaiKey =
+      prefix === "api" &&
+      api === "openai-responses" &&
+      (preferred === "openai" || preferred === "openai-codex") &&
+      (reference.provider === "openai" || reference.provider === "openai-codex");
     const model: Model<CpaApi> = {
       ...structuredClone(reference),
       id: entry.id,
@@ -351,7 +359,7 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
               supportsMidConvoEffort: false,
               allowedFallbackModels: undefined,
             }
-          : api === "google-generative-ai"
+          : api === "google-generative-ai" || openaiKey
             ? reference.compat
             : {
                 ...reference.compat,

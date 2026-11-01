@@ -2361,3 +2361,250 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
   assert.equal(aborted.stopReason, "aborted");
   assert.equal(bodies.length, 3);
 });
+
+const responsesFlags = [
+  "supportsStrictMode",
+  "supportsMidConvoSystemMessages",
+  "supportsOpenAIGrammarTools",
+  "supportsToolSearch",
+  "supportsAdditionalTools",
+];
+
+function compatFlags(compat: unknown) {
+  return responsesFlags.map((flag) => (isRecord(compat) ? compat[flag] : undefined));
+}
+
+function openAIReference() {
+  const sources = builtinCatalog();
+  const reference = sources.find(
+    (model) =>
+      model.provider === "openai" &&
+      model.api === "openai-responses" &&
+      compatFlags(model.compat).every((value) => value === true),
+  );
+  assert.ok(reference);
+  return { sources, reference };
+}
+
+test("OpenAI API-key routes keep Pi's Responses capabilities while other routes stay conservative", () => {
+  const { sources, reference } = openAIReference();
+  const flags = (id: string, owner?: string) =>
+    compatFlags(mapCatalog({ data: [{ id, owned_by: owner }] }, parseConfig({}), sources).models[0]?.compat);
+  const api = `api/${reference.id}`;
+  assert.deepEqual(
+    mapCatalog({ data: [{ id: api, owned_by: "openai" }] }, parseConfig({}), sources).models[0].compat,
+    reference.compat,
+  );
+  for (const owner of ["codex", "openai-codex"])
+    assert.ok(flags(api, owner).every((value) => value === true));
+  const conservative: [string, string | undefined][] = [
+    [reference.id, "openai"],
+    [`oauth/${reference.id}`, "openai"],
+    [`vertex/${reference.id}`, "openai"],
+    [api, "openrouter"],
+    [api, undefined],
+  ];
+  for (const [id, owner] of conservative)
+    assert.ok(
+      flags(id, owner).every((value) => value === false),
+      `${id} ${owner}`,
+    );
+  const grok = sources.find((model) => model.provider === "xai");
+  assert.ok(grok);
+  assert.ok(flags(`api/${grok.id}`, "xai").every((value) => value === false));
+});
+
+function toolSummary(tools: unknown) {
+  return Array.isArray(tools)
+    ? tools.map((tool: unknown) => (isRecord(tool) ? [tool.type, tool.name, tool.strict] : []))
+    : [];
+}
+
+test("OpenAI API-key requests carry strict and grammar tools, additional_tools items, and in-place instructions", async (t) => {
+  const { sources, reference } = openAIReference();
+  const bodies = new Map<string, Record<string, unknown>>();
+  const baseUrl = await server(t, (req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const payload: unknown = JSON.parse(body);
+      assert.ok(isRecord(payload) && typeof payload.model === "string");
+      bodies.set(payload.model, payload);
+      respond(res, "openai-responses");
+    });
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, sources);
+  const ids = [`api/${reference.id}`, reference.id];
+  const mapped = mapCatalog({ data: ids.map((id) => ({ id, owned_by: "openai" })) }, config, sources).models;
+  const strictTool = {
+    name: "lookup",
+    description: "Fixture lookup",
+    parameters: Type.Object({ city: Type.String(), unit: Type.Optional(Type.String()) }),
+    constrainedSampling: { type: "json_schema" as const, strict: "prefer" as const },
+  };
+  const grammarTool = {
+    name: "shout",
+    description: "Fixture grammar tool",
+    parameters: Type.Object({ input: Type.String() }),
+    constrainedSampling: { type: "grammar" as const, variants: { openai_lark: 'start: "HELLO"' } },
+  };
+  const lateTool = { name: "late", description: "Fixture late tool", parameters: Type.Object({}) };
+  for (const model of mapped) {
+    const result = await provider
+      .streamSimple(
+        model,
+        normalizeContext({
+          systemPrompt: "fixture-system",
+          tools: [strictTool, grammarTool],
+          messages: [
+            { role: "user", content: "fixture", timestamp: 0 },
+            { role: "system", content: "fixture-update", toolsAdded: [lateTool], timestamp: 0 },
+            { role: "user", content: "Return ok.", timestamp: 0 },
+          ],
+        }),
+        { apiKey: key, maxRetries: 0, signal: AbortSignal.timeout(5000) },
+      )
+      .result();
+    assert.equal(result.stopReason, "stop", result.errorMessage);
+  }
+  const keyed = bodies.get(ids[0]);
+  const automatic = bodies.get(ids[1]);
+  assert.ok(keyed && automatic && Array.isArray(keyed.input) && Array.isArray(automatic.input));
+  assert.equal(keyed.tools, undefined);
+  const declared = keyed.input.flatMap((item: unknown) =>
+    isRecord(item) && item.type === "additional_tools" ? [item.tools] : [],
+  );
+  assert.equal(declared.length, 2);
+  assert.deepEqual(declared.flatMap(toolSummary), [
+    ["function", "lookup", true],
+    ["custom", "shout", undefined],
+    ["function", "late", false],
+  ]);
+  assert.ok(
+    keyed.input.some(
+      (item: unknown) =>
+        isRecord(item) && item.role === "developer" && String(item.content).includes("fixture-update"),
+    ),
+  );
+  assert.deepEqual(toolSummary(automatic.tools), [
+    ["function", "lookup", null],
+    ["function", "shout", null],
+    ["function", "late", null],
+  ]);
+  assert.ok(!automatic.input.some((item: unknown) => isRecord(item) && item.type === "additional_tools"));
+});
+
+test("tool-call history replays across bare and API-key routes with matching call and result types", async (t) => {
+  const sources = builtinCatalog();
+  const references = sources.filter(
+    (model) =>
+      model.provider === "openai" &&
+      model.api === "openai-responses" &&
+      compatFlags(model.compat).every((value) => value === true),
+  );
+  assert.ok(references.length >= 2);
+  const [first, second] = references;
+  const ids = [`api/${first.id}`, `api/${second.id}`, first.id];
+  const inputs = new Map<string, unknown[]>();
+  const baseUrl = await server(t, (req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const payload: unknown = JSON.parse(body);
+      assert.ok(isRecord(payload) && typeof payload.model === "string" && Array.isArray(payload.input));
+      inputs.set(payload.model, payload.input);
+      respond(res, "openai-responses");
+    });
+  });
+  const config = parseConfig({ baseUrl });
+  const provider = createCliproxyProvider(config, sources);
+  const mapped = mapCatalog({ data: ids.map((id) => ({ id, owned_by: "openai" })) }, config, sources).models;
+  const shout = {
+    name: "shout",
+    description: "Fixture grammar tool",
+    parameters: Type.Object({ input: Type.String() }),
+    constrainedSampling: { type: "grammar" as const, variants: { openai_lark: 'start: "HELLO"' } },
+  };
+  const history = (model: string, id: string): Context => ({
+    systemPrompt: "fixture-system",
+    tools: [shout],
+    messages: [
+      { role: "user", content: "fixture", timestamp: 0 },
+      {
+        role: "assistant",
+        api: "openai-responses",
+        provider: PROVIDER_ID,
+        model,
+        content: [{ type: "toolCall", id, name: "shout", arguments: { input: "HELLO" } }],
+        stopReason: "toolUse",
+        timestamp: 0,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      } satisfies AssistantMessage,
+      {
+        role: "toolResult",
+        toolCallId: id,
+        toolName: "shout",
+        content: [{ type: "text", text: "done" }],
+        isError: false,
+        timestamp: 0,
+      },
+      { role: "user", content: "Return ok.", timestamp: 0 },
+    ],
+  });
+  const replayed = async (source: string, id: string) => {
+    inputs.clear();
+    for (const model of mapped) {
+      const result = await provider
+        .streamSimple(model, normalizeContext(history(source, id)), {
+          apiKey: key,
+          maxRetries: 0,
+          signal: AbortSignal.timeout(5000),
+        })
+        .result();
+      assert.equal(result.stopReason, "stop", result.errorMessage);
+    }
+    return (model: string) =>
+      (inputs.get(model) ?? []).flatMap((item: unknown) =>
+        isRecord(item) && typeof item.type === "string" && item.type.includes("call")
+          ? [[item.type, item.call_id, item.id, item.input ?? item.arguments]]
+          : [],
+      );
+  };
+  // Pi keeps call and item IDs for the same model and folds them into one call ID for another model.
+  const fromKey = await replayed(ids[0], "call_1|ctc_fixture");
+  assert.deepEqual(fromKey(ids[0]), [
+    ["custom_tool_call", "call_1", "ctc_fixture", "HELLO"],
+    ["custom_tool_call_output", "call_1", undefined, undefined],
+  ]);
+  assert.deepEqual(fromKey(ids[1]), [
+    ["custom_tool_call", "call_1_ctc_fixture", undefined, "HELLO"],
+    ["custom_tool_call_output", "call_1_ctc_fixture", undefined, undefined],
+  ]);
+  assert.deepEqual(fromKey(ids[2]), [
+    ["function_call", "call_1_ctc_fixture", undefined, '{"input":"HELLO"}'],
+    ["function_call_output", "call_1_ctc_fixture", undefined, undefined],
+  ]);
+  const fromBare = await replayed(ids[2], "call_2|fc_fixture");
+  assert.deepEqual(fromBare(ids[2]), [
+    ["function_call", "call_2", "fc_fixture", '{"input":"HELLO"}'],
+    ["function_call_output", "call_2", undefined, undefined],
+  ]);
+  assert.deepEqual(fromBare(ids[0]), [
+    ["custom_tool_call", "call_2_fc_fixture", undefined, "HELLO"],
+    ["custom_tool_call_output", "call_2_fc_fixture", undefined, undefined],
+  ]);
+});

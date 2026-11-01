@@ -36,10 +36,10 @@ The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.48, with Node.js 22.19 or new
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.2
+pi install npm:pi-cliproxyapi-native@0.3.3
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.2`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.3`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -348,6 +348,8 @@ After setting the prefixes, run `/cliproxyapi-refresh`. Choose `cliproxyapi/oaut
 
 The extension trusts your prefix configuration; it does not inspect credential types. Keep each prefix limited to its matching credential type. Unprefixed IDs remain **Automatic (proxy routing)** and may use either pool. Set `routing.force-model-prefix: true` in CLIProxyAPI to exclude prefixed credentials from unprefixed requests.
 
+GPT models on `api/` routes also get more of Pi's OpenAI request features, such as strict tools and tool declarations added mid-conversation. See [Protocol notes](#protocol-notes).
+
 Chat and media selections remain independent. The automatic OpenAI image default is still unprefixed; select a prefixed media model to choose its credential route.
 
 ## Thinking and child sessions
@@ -376,7 +378,11 @@ Run `/reload` after changing settings and `/cliproxyapi-refresh` before starting
 
 ## Protocol notes
 
-Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields. The extension disables unverified deferred-tool and strict-tool capabilities. Responses function tools use `strict: null` when Pi omits strictness, so optional arguments remain optional. Explicit payload hooks retain final control.
+Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields.
+
+GPT models on `api/` routes keep Pi's OpenAI Responses capabilities when the proxy lists them as owned by OpenAI. These capabilities are strict tools, grammar tools such as codemode, tool declarations added mid-conversation, tool search, and instructions placed mid-conversation. Each passed live checks through CLIProxyAPI 8.0.48 with an OpenAI API key. Unprefixed and `oauth/` GPT routes, OpenAI-compatible providers, and other model families keep these capabilities off.
+
+When Pi omits strictness in the top-level Responses tool list, the extension sends `strict: null`, so optional arguments remain optional. Tools declared inside the conversation keep Pi's strictness values. Explicit payload hooks retain final control.
 
 OpenAI images POST `model`, `prompt`, `n`, and supplied controls to `/v1/images/generations`, without `response_format`. Editing uses `/v1/images/edits` with JSON `images` and optional `mask` data URLs. A nonzero `partial_images` adds `stream: true`, and the extension reads server-sent events. Each `*.partial_image` frame becomes a progress preview, and the `*.completed` frame carries the final image and usage. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
 
