@@ -422,6 +422,8 @@ type ResponseBody = { getReader(): StreamReader & { releaseLock(): void }; cance
 async function errorDetail(reader: StreamReader, key: string) {
   const chunks: Uint8Array[] = [];
   let size = 0;
+  // A stalled error body must not hold the failure until the request deadline; cancel ends pending reads.
+  const stall = setTimeout(() => void reader.cancel().catch(() => {}), 5000);
   try {
     while (size <= 64 * 1024) {
       const chunk = await reader.read();
@@ -433,6 +435,7 @@ async function errorDetail(reader: StreamReader, key: string) {
   } catch {
     return "";
   } finally {
+    clearTimeout(stall);
     void reader.cancel().catch(() => {});
   }
 }

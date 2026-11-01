@@ -2268,3 +2268,26 @@ test("OpenAI images complete over HTTPS through a CONNECT proxy with certificate
   );
   assert.deepEqual(requests, ["origin GET", `proxy CONNECT 127.0.0.1:${originAddress.port}`, "origin POST"]);
 });
+
+test("a stalled upstream error body still reports the HTTP status promptly", {
+  timeout: 30000,
+}, async (t) => {
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET" && req.url === "/v1/models")
+        return void res.end(JSON.stringify(openaiCatalog));
+      req.resume();
+      res.writeHead(400, { "content-type": "application/json" });
+      res.write('{"error":{"message":"partial');
+    }),
+  });
+  const ctx = context(await home(t));
+  for (const operation of [
+    () => generateImage(config, { model: openaiIds[1], prompt: "fixture" }, ctx),
+    () => videoStatus(config, "fixture", ctx),
+  ]) {
+    const started = Date.now();
+    await assert.rejects(operation(), /\(HTTP 400\)\.$/);
+    assert.ok(Date.now() - started < 10000);
+  }
+});
