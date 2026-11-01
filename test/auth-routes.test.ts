@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mapCatalog, mapMediaCatalog, mediaCapability, mediaControls } from "../src/catalog.ts";
 import { PROVIDER_ID, parseConfig } from "../src/config.ts";
-import { automaticImageDefault, OPENAI_IMAGE_DEFAULT } from "../src/media-defaults.ts";
+import { automaticImageDefault, OPENAI_IMAGE_DEFAULT, resolveMediaModel } from "../src/media-defaults.ts";
 import { pickerCatalog, searchPickerItems } from "../src/picker.ts";
 import { builtinCatalog } from "../src/provider.ts";
 
@@ -86,4 +86,19 @@ test("automatic media selection remains separate from the chat credential route"
     config.aliases[aliasModel.id] = "anthropic/claude-fixture";
     assert.equal(automaticImageDefault(config, { model: aliasModel }), undefined);
   }
+});
+
+test("the picker explains why API-key gpt-image-2.5 is disabled while other routes stay usable", () => {
+  const ids = ["api/gpt-image-2.5", "gpt-image-2.5", "oauth/gpt-image-2.5"];
+  const catalog = { data: ids.map((id) => ({ id })) };
+  assert.deepEqual(
+    mapMediaCatalog(catalog).map(({ id }) => id),
+    ids.slice(1),
+  );
+  const row = pickerCatalog(catalog)[0];
+  assert.equal(row.supported, false);
+  assert.match(row.disabledReason ?? "", /no gpt-image-2.5 model.*sunburst/);
+  assert.deepEqual(mediaControls(ids[0]).quality, []);
+  assert.throws(() => resolveMediaModel(parseConfig({}), {}, "image", ids[0]), /no gpt-image-2.5 model/);
+  assert.equal(resolveMediaModel(parseConfig({}), {}, "image", ids[2]), ids[2]);
 });

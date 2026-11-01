@@ -4,7 +4,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { PROVIDER_ID, parseConfig } from "../src/config.ts";
 import { registerMediaTools } from "../src/media.ts";
 import { registerModelPicker } from "../src/picker.ts";
-import { createCliproxyProvider } from "../src/provider.ts";
+import { createCliproxyProvider, metadataCatalog } from "../src/provider.ts";
 import { registerAutoRetry } from "../src/retry.ts";
 
 export default async function (pi: ExtensionAPI) {
@@ -37,32 +37,32 @@ export default async function (pi: ExtensionAPI) {
     context = undefined;
     waits.clear();
   });
-  pi.registerProvider(
-    createCliproxyProvider(
-      config,
-      undefined,
-      (id, seconds) => {
-        if (!context) return;
-        if (seconds === undefined) waits.delete(id);
-        else {
-          if (!waits.has(id)) {
-            const message = `CLIProxyAPI quota limit. Retrying at ${new Date(Date.now() + seconds * 1000).toLocaleString()}. Cancel the current request to stop waiting.`;
-            if (context.mode === "print" || context.mode === "json") process.stderr.write(`${message}\n`);
-            else context.ui.notify(message, "warning");
-          }
-          waits.set(id, seconds);
+  const provider = createCliproxyProvider(
+    config,
+    // Session context exposes Pi's refreshed catalogs, including models newer than its bundled data.
+    () => metadataCatalog(context && ((id) => context?.modelRegistry.getProvider(id)?.getModels())),
+    (id, seconds) => {
+      if (!context) return;
+      if (seconds === undefined) waits.delete(id);
+      else {
+        if (!waits.has(id)) {
+          const message = `CLIProxyAPI quota limit. Retrying at ${new Date(Date.now() + seconds * 1000).toLocaleString()}. Cancel the current request to stop waiting.`;
+          if (context.mode === "print" || context.mode === "json") process.stderr.write(`${message}\n`);
+          else context.ui.notify(message, "warning");
         }
-        const remaining = Math.min(...waits.values());
-        context.ui.setStatus(
-          "cliproxyapi-quota",
-          waits.size
-            ? `CLIProxyAPI quota: retry in ${Math.floor(remaining / 3600)}h ${Math.floor(remaining / 60) % 60}m ${remaining % 60}s`
-            : undefined,
-        );
-      },
-      compactionSignals,
-    ),
+        waits.set(id, seconds);
+      }
+      const remaining = Math.min(...waits.values());
+      context.ui.setStatus(
+        "cliproxyapi-quota",
+        waits.size
+          ? `CLIProxyAPI quota: retry in ${Math.floor(remaining / 3600)}h ${Math.floor(remaining / 60) % 60}m ${remaining % 60}s`
+          : undefined,
+      );
+    },
+    compactionSignals,
   );
+  pi.registerProvider(provider);
   registerAutoRetry(pi);
   registerMediaTools(pi, config);
   registerModelPicker(pi, config);
@@ -88,7 +88,16 @@ export default async function (pi: ExtensionAPI) {
         return;
       }
       const count = ctx.modelRegistry.getAll().filter((model) => model.provider === PROVIDER_ID).length;
-      ctx.ui.notify(`CLIProxyAPI: ${count} models.`, "info");
+      const images = ctx.modelRegistry.getModelsOfType("image", PROVIDER_ID).length;
+      const skipped = provider.skippedModels();
+      const listed = [
+        ...skipped.slice(0, 20),
+        ...(skipped.length > 20 ? [`${skipped.length - 20} more`] : []),
+      ];
+      ctx.ui.notify(
+        `CLIProxyAPI: ${count} chat models, ${images} image models.${listed.length ? ` Not registered (missing or ambiguous Pi metadata): ${listed.join(", ")}.` : ""}`,
+        "info",
+      );
     },
   });
 }

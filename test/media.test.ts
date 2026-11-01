@@ -4,12 +4,16 @@ import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { once } from "node:events";
 import fs, { mkdtemp, readdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { type ClientRequest, createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { syncBuiltinESMExports } from "node:module";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import {
   type ExtensionAPI,
   type ExtensionToolContext,
@@ -1292,8 +1296,8 @@ test("OpenAI native transport completes delayed headers and bodies beyond fetch'
   }
 });
 
-test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery", {
-  timeout: 20000,
+test("OpenAI images honor the proxy environment and NO_PROXY without Node's proxy flag", {
+  timeout: 30000,
 }, async (t) => {
   if (!process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
     t.skip("Node's environment proxy support is unavailable.");
@@ -1334,7 +1338,12 @@ test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery",
   const address = proxyServer.address();
   assert.ok(address && typeof address !== "string");
   const proxy = `http://127.0.0.1:${address.port}`;
-  for (const bypass of [false, true]) {
+  for (const [flag, bypass] of [
+    [true, false],
+    [true, true],
+    [false, false],
+    [false, true],
+  ] as const) {
     requests.length = 0;
     await promisify(execFile)(
       process.execPath,
@@ -1359,14 +1368,17 @@ test("OpenAI images honor Node's environment proxy and NO_PROXY like discovery",
         env: {
           PATH: process.env.PATH,
           HOME: cwd,
-          NODE_USE_ENV_PROXY: "1",
+          ...(flag ? { NODE_USE_ENV_PROXY: "1" } : {}),
           HTTP_PROXY: proxy,
           NO_PROXY: bypass ? "127.0.0.1" : "",
         },
       },
     );
-    const target = bypass ? "origin" : "proxy";
-    assert.deepEqual(requests, [`${target} GET`, `${target} POST`]);
+    // Pi's own dispatcher proxies discovery; plain Node fetch needs the flag. Images use proxyEnv.
+    assert.deepEqual(
+      requests,
+      bypass ? ["origin GET", "origin POST"] : [`${flag ? "proxy" : "origin"} GET`, "proxy POST"],
+    );
   }
 });
 
@@ -1430,7 +1442,6 @@ test("OpenAI cancellation closes HTTPS proxy sockets before CONNECT completes", 
       env: {
         PATH: process.env.PATH,
         HOME: cwd,
-        NODE_USE_ENV_PROXY: "1",
         HTTPS_PROXY: `http://127.0.0.1:${address.port}`,
       },
     },
@@ -1771,6 +1782,12 @@ test("invalid OpenAI controls and edit inputs fail before authentication or netw
     { input_fidelity: "high" },
     { images: ["source.png"], input_fidelity: "high" },
     { prompt: "x".repeat(32001) },
+    { partial_images: 4 },
+    { partial_images: -1 },
+    { partial_images: 1.5 },
+    { partial_images: 1, n: 2 },
+    { model: imageModel, partial_images: 1 },
+    { model: "gemini-3-pro-image", partial_images: 1 },
   ])
     await assert.rejects(
       generateImage(config, { model: "api/gpt-image-2.5-sunburst", prompt: "fixture", ...params }, ctx),
@@ -1943,4 +1960,334 @@ test("OpenAI caller cancellation and overall timeout destroy an incoming body af
     }
   }
   assert.deepEqual(await readdir(ctx.cwd), []);
+});
+
+test("media errors show a short upstream reason without credentials, control text or raw bodies", async (t) => {
+  let response = "";
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET" && req.url === "/v1/models")
+        return void res.end(
+          JSON.stringify({ data: [...openaiCatalog.data, ...googleCatalog.data, ...catalog.data] }),
+        );
+      req.resume();
+      res.writeHead(400, { "content-type": "application/json" }).end(response);
+    }),
+  });
+  const ctx = context(await home(t));
+  const operations = [
+    () => generateImage(config, { model: openaiIds[1], prompt: "fixture" }, ctx),
+    () => generateImage(config, { model: googleIds[0], prompt: "fixture" }, ctx),
+    () => generateVideo(config, { model: videoModel, prompt: "fixture" }, ctx),
+    () => videoStatus(config, "fixture", ctx),
+  ];
+  response = JSON.stringify({
+    error: {
+      message: `Invalid size for ${key}: sk-proj-fixture123, Bearer fixture-token, xai-fixture-secret, AIzaFixtureGoogleKey012345, ya29.fixture-oauth.\n\u001b[31mred\u202e${"x".repeat(1000)}`,
+    },
+  });
+  for (const operation of operations)
+    await assert.rejects(operation(), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      const prefix = "CLIProxyAPI media request failed (HTTP 400): ";
+      assert.ok(
+        error.message.startsWith(
+          `${prefix}Invalid size for [redacted]: [redacted], [redacted], [redacted], [redacted], [redacted] [31mred x`,
+        ),
+      );
+      assert.ok(error.message.length <= prefix.length + 500);
+      for (const hidden of [
+        key,
+        "sk-proj",
+        "fixture-token",
+        "xai-fixture",
+        "AIzaFixture",
+        "ya29.",
+        "\u001b",
+        "\u202e",
+        "\n",
+      ])
+        assert.ok(!error.message.includes(hidden), hidden);
+      return true;
+    });
+  response = JSON.stringify({ code: "invalid-argument", error: "Malformed request ID" });
+  for (const operation of operations)
+    await assert.rejects(operation(), /\(HTTP 400\): Malformed request ID$/);
+  for (const value of ["<html>Bad Request</html>", JSON.stringify({ error: { code: 400 } }), "{}"]) {
+    response = value;
+    for (const operation of operations)
+      await assert.rejects(operation(), /: CLIProxyAPI media request failed \(HTTP 400\)\.$/);
+  }
+  assert.deepEqual(await readdir(ctx.cwd), []);
+});
+
+test("OpenAI image usage reaches the tool result with list-price estimates", async (t) => {
+  let usage: unknown = {
+    input_tokens: 60,
+    input_tokens_details: { text_tokens: 10, image_tokens: 50 },
+    output_tokens: 1000,
+    total_tokens: 1060,
+  };
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET")
+        return void res.end(JSON.stringify({ data: [...openaiCatalog.data, ...catalog.data] }));
+      req.resume();
+      res.end(JSON.stringify({ data: [{ b64_json: png }], usage }));
+    }),
+  });
+  const ctx = context(await home(t));
+  const priced = await generateImage(config, { model: openaiIds[1], prompt: "fixture" }, ctx);
+  assert.ok(priced.usage);
+  assert.deepEqual(
+    { ...priced.usage, cost: undefined },
+    { input: 60, output: 1000, cacheRead: 0, cacheWrite: 0, totalTokens: 1060, cost: undefined },
+  );
+  assert.ok(Math.abs(priced.usage.cost.total - (10 * 5 + 50 * 8 + 1000 * 30) / 1e6) < 1e-12);
+  const legacy = await generateImage(config, { model: "gpt-image-1.5", prompt: "fixture" }, ctx);
+  assert.ok(Math.abs((legacy.usage?.cost.output ?? 0) - (1000 * 32) / 1e6) < 1e-12);
+  const unpriced = await generateImage(config, { model: openaiIds[2], prompt: "fixture" }, ctx);
+  assert.equal(unpriced.usage?.totalTokens, 1060);
+  assert.equal(unpriced.usage?.cost.total, 0);
+  assert.equal((await generateImage(config, { model: imageModel, prompt: "fixture" }, ctx)).usage, undefined);
+  for (const value of [
+    undefined,
+    null,
+    {},
+    { input_tokens: -1, output_tokens: 1 },
+    { input_tokens: 1.5, output_tokens: 1 },
+    { input_tokens: "1", output_tokens: 1 },
+  ]) {
+    usage = value;
+    assert.equal(
+      (await generateImage(config, { model: openaiIds[1], prompt: "fixture" }, ctx)).usage,
+      undefined,
+    );
+  }
+});
+
+test("partial previews stream over the image transport and only the final image is saved", async (t) => {
+  let mode = "success";
+  const posted: unknown[] = [];
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET") return void res.end(JSON.stringify(openaiCatalog));
+      assert.equal(req.headers["accept-encoding"], "identity");
+      void body(req).then((value) => {
+        posted.push(value);
+        if (!(value && typeof value === "object" && "stream" in value))
+          return void res.end(JSON.stringify({ data: [{ b64_json: png }] }));
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const send = (event: { type: string; [field: string]: unknown }) =>
+          res.write(`event: ${event.type}\r\ndata: ${JSON.stringify(event)}\r\n\r\n`);
+        res.write(": keep-alive\n\n");
+        send({ type: "image_generation.partial_image", b64_json: jpeg, partial_image_index: 0 });
+        // Split the CRLF separator between two writes so the reader sees CR and LF in separate chunks.
+        const invalid = { type: "image_generation.partial_image", b64_json: "!!!!", partial_image_index: 1 };
+        res.write(`event: ${invalid.type}\r\ndata: ${JSON.stringify(invalid)}\r\n\r`);
+        void sleep(25).then(() => {
+          res.write("\n");
+          if (mode === "error") send({ type: "error", error: { message: `Moderation blocked ${key}` } });
+          else if (mode === "success") {
+            const usage = { input_tokens: 10, output_tokens: 300, total_tokens: 310 };
+            const frame = `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: png, usage })}\n\n`;
+            res.write(frame.slice(0, 20));
+            res.write(frame.slice(20));
+          }
+          res.end();
+        });
+      });
+    }),
+  });
+  const ctx = context(await home(t));
+  const previews: { index: number; image: ImageContent }[] = [];
+  const progress: string[] = [];
+  const result = await generateImage(
+    config,
+    { model: openaiIds[1], prompt: "fixture", partial_images: 2 },
+    ctx,
+    undefined,
+    (text) => progress.push(text),
+    (image, index) => previews.push({ index, image }),
+  );
+  assert.deepEqual(posted[0], {
+    model: openaiIds[1],
+    prompt: "fixture",
+    n: 1,
+    stream: true,
+    partial_images: 2,
+  });
+  assert.deepEqual(previews, [{ index: 0, image: { type: "image", data: jpeg, mimeType: "image/jpeg" } }]);
+  assert.deepEqual(progress, ["Generating image...", "Saving image..."]);
+  assert.equal(result.details.files.length, 1);
+  assert.equal((await readFile(result.details.files[0].path)).toString("base64"), png);
+  assert.equal(result.usage?.totalTokens, 310);
+  const tools: Parameters<ExtensionAPI["registerTool"]>[0][] = [];
+  registerMediaTools(
+    {
+      registerTool(tool) {
+        tools.push(tool as unknown as (typeof tools)[number]);
+      },
+    } as ExtensionAPI,
+    config,
+  );
+  const tool = tools.find((entry) => entry.name === "cliproxyapi_generate_image");
+  assert.ok(tool);
+  const updates: unknown[] = [];
+  await tool.execute(
+    "fixture",
+    { model: openaiIds[1], prompt: "fixture", partial_images: 1 },
+    undefined,
+    (update) => updates.push(update),
+    ctx as unknown as ExtensionToolContext,
+  );
+  assert.deepEqual(updates[1], {
+    content: [
+      { type: "text", text: "Partial image 1" },
+      { type: "image", data: jpeg, mimeType: "image/jpeg" },
+    ],
+    details: {},
+  });
+  mode = "error";
+  await assert.rejects(
+    generateImage(config, { model: openaiIds[1], prompt: "fixture", partial_images: 1 }, ctx),
+    /: CLIProxyAPI image stream failed: Moderation blocked \[redacted\]$/,
+  );
+  mode = "incomplete";
+  await assert.rejects(
+    generateImage(config, { model: openaiIds[1], prompt: "fixture", partial_images: 1 }, ctx),
+    /must complete 1 image/,
+  );
+  await generateImage(config, { model: openaiIds[1], prompt: "fixture", partial_images: 0 }, ctx);
+  assert.deepEqual(posted.at(-1), { model: openaiIds[1], prompt: "fixture", n: 1 });
+  assert.equal((await readdir(join(ctx.cwd, ".pi"))).length, 3);
+});
+
+test("OpenAI images complete over HTTPS through a CONNECT proxy with certificate checks", {
+  timeout: 30000,
+}, async (t) => {
+  if (!process.allowedNodeEnvironmentFlags.has("--use-env-proxy")) {
+    t.skip("Node's environment proxy support is unavailable.");
+    return;
+  }
+  const cwd = await home(t);
+  const [keyPath, certPath] = [join(cwd, "key.pem"), join(cwd, "cert.pem")];
+  try {
+    await promisify(execFile)(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:prime256v1",
+        "-nodes",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=127.0.0.1",
+        "-addext",
+        "subjectAltName=IP:127.0.0.1",
+        "-keyout",
+        keyPath,
+        "-out",
+        certPath,
+      ],
+      { timeout: 10000 },
+    );
+  } catch {
+    t.skip("OpenSSL is unavailable.");
+    return;
+  }
+  const requests: string[] = [];
+  const origin = createHttpsServer(
+    { key: await readFile(keyPath), cert: await readFile(certPath) },
+    (req, res) => {
+      requests.push(`origin ${req.method}`);
+      assert.equal(req.headers.authorization, `Bearer ${key}`);
+      req.resume();
+      res.end(JSON.stringify(req.method === "GET" ? openaiCatalog : { data: [{ b64_json: png }] }));
+    },
+  );
+  origin.listen(0, "127.0.0.1");
+  await once(origin, "listening");
+  t.after(() => {
+    origin.closeAllConnections();
+    origin.close();
+  });
+  const originAddress = origin.address();
+  assert.ok(originAddress && typeof originAddress !== "string");
+  const proxy = createServer(() => assert.fail("HTTPS image requests must use a CONNECT tunnel"));
+  proxy.on("connect", (req, socket, head) => {
+    requests.push(`proxy CONNECT ${req.url}`);
+    const upstream = connect(originAddress.port, "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => {
+    proxy.closeAllConnections();
+    proxy.close();
+  });
+  const proxyAddress = proxy.address();
+  assert.ok(proxyAddress && typeof proxyAddress !== "string");
+  await promisify(execFile)(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+      import assert from "node:assert/strict";
+      import { generateImage } from ${JSON.stringify(pathToFileURL(resolve("src/media.ts")).href)};
+      import { parseConfig } from ${JSON.stringify(pathToFileURL(resolve("src/config.ts")).href)};
+      const result = await generateImage(parseConfig({ baseUrl: "https://127.0.0.1:${originAddress.port}" }),
+        { model: ${JSON.stringify(openaiIds[1])}, prompt: "fixture" },
+        { cwd: process.cwd(), model: undefined, modelRegistry: {
+          getProviderAuth: async () => ({ auth: { apiKey: ${JSON.stringify(key)} } })
+        } }, AbortSignal.timeout(10000));
+      assert.equal(result.details.files[0].mimeType, "image/png");
+      `,
+    ],
+    {
+      cwd,
+      timeout: 20000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: cwd,
+        HTTPS_PROXY: `http://127.0.0.1:${proxyAddress.port}`,
+        NODE_EXTRA_CA_CERTS: certPath,
+      },
+    },
+  );
+  assert.deepEqual(requests, ["origin GET", `proxy CONNECT 127.0.0.1:${originAddress.port}`, "origin POST"]);
+});
+
+test("a stalled upstream error body still reports the HTTP status promptly", {
+  timeout: 30000,
+}, async (t) => {
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET" && req.url === "/v1/models")
+        return void res.end(JSON.stringify(openaiCatalog));
+      req.resume();
+      res.writeHead(400, { "content-type": "application/json" });
+      res.write('{"error":{"message":"partial');
+    }),
+  });
+  const ctx = context(await home(t));
+  for (const operation of [
+    () => generateImage(config, { model: openaiIds[1], prompt: "fixture" }, ctx),
+    () => videoStatus(config, "fixture", ctx),
+  ]) {
+    const started = Date.now();
+    await assert.rejects(operation(), /\(HTTP 400\)\.$/);
+    assert.ok(Date.now() - started < 10000);
+  }
 });
