@@ -93,6 +93,8 @@ Search by friendly name, exact ID, backend, owner, or image/video purpose. The p
 
 The terminal picker is keyboard-only. Type to search, use the selection keys to move, press Enter to select, or Escape to cancel. It respects custom selection keybindings. Mouse clicks and wheel events do not change selection.
 
+Starting session or branch navigation discards pending picker commands, even if another extension later cancels navigation. Run the selection again if you stay on the same branch.
+
 RPC, print, and JSON modes return text instead of opening the picker. Print mode uses stderr, JSON mode emits custom-message events, and RPC sends notifications. Listings show up to 100 matches; narrow larger lists with `search`. Use `select <exact ID>` to choose a model in these modes.
 
 ### Generate media
