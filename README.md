@@ -348,8 +348,6 @@ After setting the prefixes, run `/cliproxyapi-refresh`. Choose `cliproxyapi/oaut
 
 The extension trusts your prefix configuration; it does not inspect credential types. Keep each prefix limited to its matching credential type. Unprefixed IDs remain **Automatic (proxy routing)** and may use either pool. Set `routing.force-model-prefix: true` in CLIProxyAPI to exclude prefixed credentials from unprefixed requests.
 
-GPT models on `api/` routes also get more of Pi's OpenAI request features, such as strict tools and tool declarations added mid-conversation. See [Protocol notes](#protocol-notes).
-
 Chat and media selections remain independent. The automatic OpenAI image default is still unprefixed; select a prefixed media model to choose its credential route.
 
 ## Thinking and child sessions
@@ -380,7 +378,9 @@ Run `/reload` after changing settings and `/cliproxyapi-refresh` before starting
 
 Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields.
 
-GPT models on `api/` routes keep Pi's OpenAI Responses capabilities when the proxy lists them as owned by OpenAI. These capabilities are strict tools, grammar tools such as codemode, tool declarations added mid-conversation, tool search, and instructions placed mid-conversation. Each passed live checks through CLIProxyAPI 8.0.48 with an OpenAI API key. Unprefixed and `oauth/` GPT routes, OpenAI-compatible providers, and other model families keep these capabilities off.
+GPT models keep Pi's OpenAI Responses capabilities when the proxy lists them as owned by OpenAI. These capabilities are strict tools, grammar tools such as codemode, tool declarations added mid-conversation, tool search, and instructions placed mid-conversation. Each passed live checks through CLIProxyAPI 8.0.48 with an OpenAI API key and with a ChatGPT subscription. OpenAI-compatible providers and other model families keep these capabilities off.
+
+On `api/` routes, Pi can send thinking effort as a `configuration_update` item. ChatGPT subscriptions ignore that item, so unprefixed and `oauth/` routes send the effort as a request field.
 
 When Pi omits strictness in the top-level Responses tool list, the extension sends `strict: null`, so optional arguments remain optional. Tools declared inside the conversation keep Pi's strictness values. Explicit payload hooks retain final control.
 

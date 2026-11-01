@@ -169,7 +169,8 @@ test("mapping keeps native metadata and routes every supported family to the pro
   assert.equal(claude.compat?.supportsMidConvoToolChanges, false);
   for (const model of result.models) {
     if (hasApi(model, "google-generative-ai")) continue;
-    assert.equal(model.compat?.supportsMidConvoSystemMessages, false);
+    // OpenAI-owned Responses routes keep Pi's transcript capabilities; other families stay conservative.
+    assert.equal(model.compat?.supportsMidConvoSystemMessages, hasApi(model, "openai-responses"));
     if (hasApi(model, "openai-completions")) assert.equal(model.compat?.supportsMidConvoToolAdditions, false);
   }
 });
@@ -2216,7 +2217,7 @@ test("live Pi catalogs add newer metadata, bundled metadata wins, and xAI chat u
       id,
       api: "openai-responses",
       baseUrl: "http://localhost:8317/v1",
-      strict: false,
+      strict: id === newer.id,
     })),
   );
   assert.deepEqual(mapCatalog({ data: [{ id: newer.id }] }, parseConfig({}), bundled).skipped, [newer.id]);
@@ -2374,44 +2375,64 @@ function compatFlags(compat: unknown) {
   return responsesFlags.map((flag) => (isRecord(compat) ? compat[flag] : undefined));
 }
 
-function openAIReference() {
+function midConvoEffort(compat: unknown) {
+  return isRecord(compat) ? compat.supportsMidConvoEffort : undefined;
+}
+
+function openAIReferences() {
   const sources = builtinCatalog();
-  const reference = sources.find(
+  const references = sources.filter(
     (model) =>
       model.provider === "openai" &&
       model.api === "openai-responses" &&
-      compatFlags(model.compat).every((value) => value === true),
+      compatFlags(model.compat).every((value) => value === true) &&
+      midConvoEffort(model.compat) === true,
   );
-  assert.ok(reference);
-  return { sources, reference };
+  assert.ok(references.length >= 3);
+  return { sources, references };
 }
 
-test("OpenAI API-key routes keep Pi's Responses capabilities while other routes stay conservative", () => {
-  const { sources, reference } = openAIReference();
-  const flags = (id: string, owner?: string) =>
-    compatFlags(mapCatalog({ data: [{ id, owned_by: owner }] }, parseConfig({}), sources).models[0]?.compat);
+test("OpenAI routes keep Pi's Responses capabilities, and only API keys keep mid-conversation effort", () => {
+  const {
+    sources,
+    references: [reference],
+  } = openAIReferences();
+  const compat = (id: string, owner?: string) =>
+    mapCatalog({ data: [{ id, owned_by: owner }] }, parseConfig({}), sources).models[0]?.compat;
+  const codex = sources.find((model) => model.provider === "openai-codex" && model.id === reference.id);
+  assert.ok(codex);
   const api = `api/${reference.id}`;
-  assert.deepEqual(
-    mapCatalog({ data: [{ id: api, owned_by: "openai" }] }, parseConfig({}), sources).models[0].compat,
-    reference.compat,
-  );
-  for (const owner of ["codex", "openai-codex"])
-    assert.ok(flags(api, owner).every((value) => value === true));
+  assert.deepEqual(compat(api, "openai"), reference.compat);
+  assert.deepEqual(compat(api, "codex"), codex.compat);
+  for (const id of [reference.id, `oauth/${reference.id}`]) {
+    assert.deepEqual(compat(id, "openai"), { ...reference.compat, supportsMidConvoEffort: false });
+    assert.deepEqual(compat(id, "openai-codex"), { ...codex.compat, supportsMidConvoEffort: false });
+  }
   const conservative: [string, string | undefined][] = [
-    [reference.id, "openai"],
-    [`oauth/${reference.id}`, "openai"],
     [`vertex/${reference.id}`, "openai"],
     [api, "openrouter"],
     [api, undefined],
+    [reference.id, undefined],
+    [`custom/${reference.id}`, "openai"],
   ];
-  for (const [id, owner] of conservative)
-    assert.ok(
-      flags(id, owner).every((value) => value === false),
-      `${id} ${owner}`,
-    );
+  const aliased = ["custom", "oauth/api"].map((route) => {
+    const id = `${route}/${reference.id}`;
+    const value = mapCatalog(
+      { data: [{ id, owned_by: "openai" }] },
+      parseConfig({ aliases: { [id]: `openai/${reference.id}` } }),
+      sources,
+    ).models[0]?.compat;
+    assert.ok(value, id);
+    return value;
+  });
+  for (const value of [...conservative.map(([id, owner]) => compat(id, owner)), ...aliased]) {
+    if (value === undefined) continue;
+    assert.ok(compatFlags(value).every((flag) => flag === false));
+    assert.equal(midConvoEffort(value), false);
+  }
   const grok = sources.find((model) => model.provider === "xai");
   assert.ok(grok);
-  assert.ok(flags(`api/${grok.id}`, "xai").every((value) => value === false));
+  assert.ok(compatFlags(compat(`api/${grok.id}`, "xai")).every((value) => value === false));
 });
 
 function toolSummary(tools: unknown) {
@@ -2420,8 +2441,11 @@ function toolSummary(tools: unknown) {
     : [];
 }
 
-test("OpenAI API-key requests carry strict and grammar tools, additional_tools items, and in-place instructions", async (t) => {
-  const { sources, reference } = openAIReference();
+test("OpenAI routes send strict and grammar tools, additional_tools items, in-place instructions, and route-specific effort", async (t) => {
+  const {
+    sources,
+    references: [reference, other],
+  } = openAIReferences();
   const bodies = new Map<string, Record<string, unknown>>();
   const baseUrl = await server(t, (req, res) => {
     let body = "";
@@ -2438,8 +2462,18 @@ test("OpenAI API-key requests carry strict and grammar tools, additional_tools i
   });
   const config = parseConfig({ baseUrl });
   const provider = createCliproxyProvider(config, sources);
-  const ids = [`api/${reference.id}`, reference.id];
-  const mapped = mapCatalog({ data: ids.map((id) => ({ id, owned_by: "openai" })) }, config, sources).models;
+  const ids = [`api/${reference.id}`, reference.id, `api/${other.id}`];
+  const mapped = mapCatalog(
+    {
+      data: [
+        { id: ids[0], owned_by: "openai" },
+        { id: ids[1], owned_by: "openai" },
+        { id: ids[2], owned_by: "openrouter" },
+      ],
+    },
+    config,
+    sources,
+  ).models;
   const strictTool = {
     name: "lookup",
     description: "Fixture lookup",
@@ -2466,49 +2500,59 @@ test("OpenAI API-key requests carry strict and grammar tools, additional_tools i
             { role: "user", content: "Return ok.", timestamp: 0 },
           ],
         }),
-        { apiKey: key, maxRetries: 0, signal: AbortSignal.timeout(5000) },
+        { apiKey: key, maxRetries: 0, reasoning: "high", signal: AbortSignal.timeout(5000) },
       )
       .result();
     assert.equal(result.stopReason, "stop", result.errorMessage);
   }
-  const keyed = bodies.get(ids[0]);
-  const automatic = bodies.get(ids[1]);
-  assert.ok(keyed && automatic && Array.isArray(keyed.input) && Array.isArray(automatic.input));
-  assert.equal(keyed.tools, undefined);
-  const declared = keyed.input.flatMap((item: unknown) =>
-    isRecord(item) && item.type === "additional_tools" ? [item.tools] : [],
-  );
-  assert.equal(declared.length, 2);
-  assert.deepEqual(declared.flatMap(toolSummary), [
-    ["function", "lookup", true],
-    ["custom", "shout", undefined],
-    ["function", "late", false],
-  ]);
-  assert.ok(
-    keyed.input.some(
-      (item: unknown) =>
-        isRecord(item) && item.role === "developer" && String(item.content).includes("fixture-update"),
-    ),
-  );
-  assert.deepEqual(toolSummary(automatic.tools), [
+  for (const id of ids.slice(0, 2)) {
+    const body = bodies.get(id);
+    assert.ok(body && Array.isArray(body.input), id);
+    assert.equal(body.tools, undefined);
+    const declared = body.input.flatMap((item: unknown) =>
+      isRecord(item) && item.type === "additional_tools" ? [item.tools] : [],
+    );
+    assert.deepEqual(declared.flatMap(toolSummary), [
+      ["function", "lookup", true],
+      ["custom", "shout", undefined],
+      ["function", "late", false],
+    ]);
+    assert.ok(
+      body.input.some(
+        (item: unknown) =>
+          isRecord(item) && item.role === "developer" && String(item.content).includes("fixture-update"),
+      ),
+    );
+    const updates = body.input.filter(
+      (item: unknown) => isRecord(item) && item.type === "configuration_update",
+    );
+    assert.ok(isRecord(body.reasoning));
+    // API keys apply configuration_update items; subscriptions need the effort on the request.
+    if (id === ids[0]) {
+      assert.deepEqual(updates, [{ type: "configuration_update", reasoning: { effort: "high" } }]);
+      assert.equal(body.reasoning.effort, "medium");
+    } else {
+      assert.deepEqual(updates, []);
+      assert.equal(body.reasoning.effort, "high");
+    }
+  }
+  const conservative = bodies.get(ids[2]);
+  assert.ok(conservative && Array.isArray(conservative.input) && isRecord(conservative.reasoning));
+  assert.deepEqual(toolSummary(conservative.tools), [
     ["function", "lookup", null],
     ["function", "shout", null],
     ["function", "late", null],
   ]);
-  assert.ok(!automatic.input.some((item: unknown) => isRecord(item) && item.type === "additional_tools"));
+  assert.ok(!conservative.input.some((item: unknown) => isRecord(item) && item.type === "additional_tools"));
+  assert.equal(conservative.reasoning.effort, "high");
 });
 
-test("tool-call history replays across bare and API-key routes with matching call and result types", async (t) => {
-  const sources = builtinCatalog();
-  const references = sources.filter(
-    (model) =>
-      model.provider === "openai" &&
-      model.api === "openai-responses" &&
-      compatFlags(model.compat).every((value) => value === true),
-  );
-  assert.ok(references.length >= 2);
-  const [first, second] = references;
-  const ids = [`api/${first.id}`, `api/${second.id}`, first.id];
+test("tool-call history replays across OpenAI routes and conservative routes with matching call and result types", async (t) => {
+  const {
+    sources,
+    references: [first, second, third],
+  } = openAIReferences();
+  const ids = [`api/${first.id}`, `api/${second.id}`, first.id, `api/${third.id}`];
   const inputs = new Map<string, unknown[]>();
   const baseUrl = await server(t, (req, res) => {
     let body = "";
@@ -2525,7 +2569,11 @@ test("tool-call history replays across bare and API-key routes with matching cal
   });
   const config = parseConfig({ baseUrl });
   const provider = createCliproxyProvider(config, sources);
-  const mapped = mapCatalog({ data: ids.map((id) => ({ id, owned_by: "openai" })) }, config, sources).models;
+  const mapped = mapCatalog(
+    { data: ids.map((id, index) => ({ id, owned_by: index === 3 ? "openrouter" : "openai" })) },
+    config,
+    sources,
+  ).models;
   const shout = {
     name: "shout",
     description: "Fixture grammar tool",
@@ -2590,20 +2638,21 @@ test("tool-call history replays across bare and API-key routes with matching cal
     ["custom_tool_call", "call_1", "ctc_fixture", "HELLO"],
     ["custom_tool_call_output", "call_1", undefined, undefined],
   ]);
-  assert.deepEqual(fromKey(ids[1]), [
-    ["custom_tool_call", "call_1_ctc_fixture", undefined, "HELLO"],
-    ["custom_tool_call_output", "call_1_ctc_fixture", undefined, undefined],
-  ]);
-  assert.deepEqual(fromKey(ids[2]), [
+  for (const id of [ids[1], ids[2]])
+    assert.deepEqual(fromKey(id), [
+      ["custom_tool_call", "call_1_ctc_fixture", undefined, "HELLO"],
+      ["custom_tool_call_output", "call_1_ctc_fixture", undefined, undefined],
+    ]);
+  assert.deepEqual(fromKey(ids[3]), [
     ["function_call", "call_1_ctc_fixture", undefined, '{"input":"HELLO"}'],
     ["function_call_output", "call_1_ctc_fixture", undefined, undefined],
   ]);
-  const fromBare = await replayed(ids[2], "call_2|fc_fixture");
-  assert.deepEqual(fromBare(ids[2]), [
+  const fromConservative = await replayed(ids[3], "call_2|fc_fixture");
+  assert.deepEqual(fromConservative(ids[3]), [
     ["function_call", "call_2", "fc_fixture", '{"input":"HELLO"}'],
     ["function_call_output", "call_2", undefined, undefined],
   ]);
-  assert.deepEqual(fromBare(ids[0]), [
+  assert.deepEqual(fromConservative(ids[2]), [
     ["custom_tool_call", "call_2_fc_fixture", undefined, "HELLO"],
     ["custom_tool_call_output", "call_2_fc_fixture", undefined, undefined],
   ]);

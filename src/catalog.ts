@@ -332,12 +332,14 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       skipped.add(entry.id);
       continue;
     }
-    // OpenAI API keys reach OpenAI through CLIProxyAPI's Codex executor, which forwards strict and
-    // grammar tools, additional_tools, and mid-conversation instructions (live-checked on 8.0.48).
-    // OpenAI-compatible providers report their own owner, so the api/ prefix alone does not qualify.
-    const openaiKey =
-      prefix === "api" &&
+    // CLIProxyAPI 8.0.48 forwards strict and grammar tools, additional_tools, tool search, and
+    // mid-conversation instructions to OpenAI API keys and ChatGPT subscriptions (live-checked).
+    // Other owners stay conservative. If an OpenAI-compatible provider shares a bare ID, the proxy
+    // lists one owner, and its Chat translator converts these items for that provider.
+    const openai =
       api === "openai-responses" &&
+      !metadataId.includes("/") &&
+      (!prefix || prefix === "api" || prefix === "oauth") &&
       (preferred === "openai" || preferred === "openai-codex") &&
       (reference.provider === "openai" || reference.provider === "openai-codex");
     const model: Model<CpaApi> = {
@@ -359,17 +361,21 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
               supportsMidConvoEffort: false,
               allowedFallbackModels: undefined,
             }
-          : api === "google-generative-ai" || openaiKey
+          : api === "google-generative-ai"
             ? reference.compat
-            : {
-                ...reference.compat,
-                supportsStrictMode: false,
-                supportsMidConvoSystemMessages: false,
-                supportsMidConvoToolAdditions: false,
-                supportsOpenAIGrammarTools: false,
-                supportsToolSearch: false,
-                supportsAdditionalTools: false,
-              },
+            : openai
+              ? // ChatGPT subscriptions ignore configuration_update effort items; only API keys apply them.
+                { ...reference.compat, ...(prefix === "api" ? {} : { supportsMidConvoEffort: false }) }
+              : {
+                  ...reference.compat,
+                  supportsStrictMode: false,
+                  supportsMidConvoSystemMessages: false,
+                  supportsMidConvoToolAdditions: false,
+                  supportsOpenAIGrammarTools: false,
+                  supportsToolSearch: false,
+                  supportsAdditionalTools: false,
+                  supportsMidConvoEffort: false,
+                },
     };
     models.set(model.id, model);
     skipped.delete(model.id);
