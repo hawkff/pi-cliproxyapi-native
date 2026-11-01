@@ -1,5 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { type Config, isModelId, isRecord, PROVIDER_ID } from "./config.ts";
+import { type Config, deadline, isModelId, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
 
 export type CpaApi =
   | "anthropic-messages"
@@ -34,6 +34,51 @@ export function parseCatalog(value: unknown) {
   });
 }
 
+export async function fetchCatalog(config: Config, key: string, signal: AbortSignal) {
+  validateKey(key);
+  const boundedSignal = deadline(signal, 10000);
+  let response: Response;
+  try {
+    response = await fetch(`${config.baseUrl}/v1/models`, {
+      headers: { Authorization: `Bearer ${key}` },
+      redirect: "error",
+      signal: boundedSignal,
+    });
+  } catch {
+    signal.throwIfAborted();
+    throw new Error("CLIProxyAPI discovery failed: connection, timeout, or redirect error.");
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`CLIProxyAPI discovery failed (HTTP ${response.status}).`);
+  }
+  let payload: unknown;
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("CLIProxyAPI discovery returned an empty response.");
+  try {
+    const decoder = new TextDecoder();
+    let text = "";
+    let size = 0;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > 4 * 1024 * 1024) {
+        await reader.cancel();
+        throw new Error("Catalog too large.");
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    payload = JSON.parse(text + decoder.decode());
+  } catch {
+    signal.throwIfAborted();
+    throw new Error("CLIProxyAPI catalog is invalid, incomplete, or larger than 4 MiB.");
+  } finally {
+    reader.releaseLock();
+  }
+  return payload;
+}
+
 // Resolve metadata and capabilities without changing registry or request IDs.
 export function modelRoute(id: string) {
   const match = /^(vertex|antigravity|oauth|api)\/(.+)$/.exec(id);
@@ -59,17 +104,31 @@ export function routedName(id: string, name = id) {
 export type MediaPurpose = "image" | "video";
 
 const imagenRetirement = "Retired on Vertex (June 2026); disabled. Select a Nano Banana image model instead.";
+// OpenAI list prices in USD per million tokens: text input, image input, image output.
+const gptImage2Price = [5, 8, 30] as const;
 
 // Exact media IDs, including retired entries; vision input alone does not imply image output.
 const mediaModels = new Map<
   string,
-  { name: string; purpose: MediaPurpose; route?: "xai" | "gemini" | "openai"; disabledReason?: string }
+  {
+    name: string;
+    purpose: MediaPurpose;
+    route?: "xai" | "gemini" | "openai";
+    disabledReason?: string;
+    price?: readonly [number, number, number];
+  }
 >([
-  ["gpt-image-2.5-flare", { name: "GPT Image 2.5 Flare", purpose: "image", route: "openai" }],
-  ["gpt-image-2.5-sunburst", { name: "GPT Image 2.5 Sunburst", purpose: "image", route: "openai" }],
+  [
+    "gpt-image-2.5-flare",
+    { name: "GPT Image 2.5 Flare", purpose: "image", route: "openai", price: gptImage2Price },
+  ],
+  [
+    "gpt-image-2.5-sunburst",
+    { name: "GPT Image 2.5 Sunburst", purpose: "image", route: "openai", price: gptImage2Price },
+  ],
   ["gpt-image-2.5", { name: "GPT Image 2.5", purpose: "image", route: "openai" }],
-  ["gpt-image-2", { name: "GPT Image 2", purpose: "image", route: "openai" }],
-  ["gpt-image-1.5", { name: "GPT Image 1.5", purpose: "image", route: "openai" }],
+  ["gpt-image-2", { name: "GPT Image 2", purpose: "image", route: "openai", price: gptImage2Price }],
+  ["gpt-image-1.5", { name: "GPT Image 1.5", purpose: "image", route: "openai", price: [5, 8, 32] }],
   ["grok-imagine-image", { name: "Grok Imagine Image", purpose: "image", route: "xai" }],
   ["grok-imagine-image-quality", { name: "Grok Imagine Image Quality", purpose: "image", route: "xai" }],
   ["grok-imagine-image-2.0", { name: "Grok Imagine Image 2.0", purpose: "image", route: "xai" }],
@@ -100,10 +159,19 @@ const mediaModels = new Map<
 ]);
 
 export function mediaCapability(id: string) {
-  const { metadataId, backend } = modelRoute(id);
+  const { metadataId, backend, authType } = modelRoute(id);
   const capability = mediaModels.get(metadataId);
   if (backend && (capability?.route === "xai" || capability?.route === "openai")) {
     return { ...capability, route: undefined, disabledReason: `Unsupported media execution on ${backend}.` };
+  }
+  // CLIProxyAPI 8.0.48 advertises it for API keys, but OpenAI's Images API rejects the bare 2.5 name.
+  if (capability && authType === "api-key" && metadataId === "gpt-image-2.5") {
+    return {
+      ...capability,
+      route: undefined,
+      disabledReason:
+        "OpenAI's API has no gpt-image-2.5 model. Use api/gpt-image-2.5-sunburst or api/gpt-image-2.5-flare.",
+    };
   }
   return capability;
 }
@@ -160,11 +228,35 @@ export function mediaControls(id: string) {
     moderation: openai ? ["auto", "low"] : [],
     // Subscription image-tool translation does not forward n.
     n: openai ? { min: 1, max: authType === "api-key" ? 10 : 1 } : undefined,
+    partial_images: openai ? { min: 0, max: 3 } : undefined,
     editing: openai
       ? { max_images: 16, max_file_bytes: 14 * 1024 * 1024, max_total_bytes: 20 * 1024 * 1024, mask: "png" }
       : undefined,
     input_fidelity: openai && metadataId === "gpt-image-1.5" ? ["low", "high"] : [],
   };
+}
+
+export const IMAGE_API = "cliproxyapi-images";
+
+// Pi image models for codemode and extensions; video stays tool-only because Pi has no video interface.
+export function mapImageModels(value: unknown, config: Config) {
+  return mapMediaCatalog(value).flatMap(({ id, purpose, name, controls }) => {
+    if (purpose !== "image") return [];
+    const [input = 0, , output = 0] = mediaCapability(id)?.price ?? [];
+    return [
+      {
+        type: "image" as const,
+        id,
+        name,
+        api: IMAGE_API,
+        provider: PROVIDER_ID,
+        baseUrl: config.baseUrl,
+        input: controls.editing ? ["text" as const, "image" as const] : ["text" as const],
+        output: ["image" as const],
+        cost: { input, output, cacheRead: 0, cacheWrite: 0 },
+      },
+    ];
+  });
 }
 
 export function mapMediaCatalog(value: unknown) {
@@ -194,6 +286,7 @@ const owners: Readonly<Record<string, string>> = {
   google: "google",
   gemini: "google",
   "gemini-cli": "google",
+  xai: "xai",
 };
 
 // Built-in aliases for advertised IDs without native metadata; exact metadata still wins.
@@ -209,11 +302,7 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
   const byId = Map.groupBy(known, (model) => model.id);
   const byReference = Map.groupBy(known, (model) => `${model.provider}/${model.id}`);
   for (const entry of parseCatalog(value)) {
-    if (entry.hidden || models.has(entry.id)) continue;
-    if (mediaPurpose(entry.id)) {
-      skipped.add(entry.id);
-      continue;
-    }
+    if (entry.hidden || models.has(entry.id) || mediaPurpose(entry.id)) continue;
     const { metadataId, prefix } = modelRoute(entry.id);
     const routed = !entry.id.includes("/") || prefix;
     const alias = Object.hasOwn(config.aliases, entry.id)

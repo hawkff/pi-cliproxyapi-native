@@ -7,8 +7,8 @@ import {
   type TuiMouseEvent,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
-import { backendLabel, mediaCapability, parseCatalog, routedName } from "./catalog.ts";
-import type { Config } from "./config.ts";
+import { backendLabel, fetchCatalog, mediaCapability, parseCatalog, routedName } from "./catalog.ts";
+import { type Config, deadline } from "./config.ts";
 import { mediaKey } from "./media.ts";
 import {
   effectiveMediaDefaults,
@@ -16,7 +16,6 @@ import {
   type MediaDefaults,
   readMediaDefaults,
 } from "./media-defaults.ts";
-import { deadline, fetchCatalog } from "./provider.ts";
 
 export function pickerCatalog(value: unknown) {
   const rows = new Map<

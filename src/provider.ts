@@ -18,10 +18,19 @@ import {
   openAIResponsesApi,
 } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import { type CpaApi, endpoint, mapCatalog, modelRoute } from "./catalog.ts";
+import {
+  type CpaApi,
+  endpoint,
+  fetchCatalog,
+  IMAGE_API,
+  mapCatalog,
+  mapImageModels,
+  modelRoute,
+} from "./catalog.ts";
 import { type QuotaWaitHandler, waitForClaudeQuota } from "./claude-quota.ts";
 import { withCompactionRecovery } from "./compaction.ts";
-import { type Config, isRecord, PROVIDER_ID } from "./config.ts";
+import { type Config, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
+import { generateNativeImages } from "./media.ts";
 
 export type { QuotaWaitHandler } from "./claude-quota.ts";
 
@@ -31,63 +40,21 @@ export function builtinCatalog() {
     ...getBuiltinModels("openai"),
     ...getBuiltinModels("openai-codex"),
     ...getBuiltinModels("google"),
+    ...getBuiltinModels("xai"),
   ];
 }
 
-export function validateKey(key: string) {
-  if (!/^[!-~]{1,4096}$/.test(key)) {
-    throw new Error("CLIProxyAPI requires a non-empty API key without whitespace or control characters.");
-  }
-  return key;
-}
-
-export function deadline(signal: AbortSignal | undefined, milliseconds: number) {
-  return AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(milliseconds)]);
-}
-
-export async function fetchCatalog(config: Config, key: string, signal: AbortSignal) {
-  validateKey(key);
-  const boundedSignal = deadline(signal, 10000);
-  let response: Response;
-  try {
-    response = await fetch(`${config.baseUrl}/v1/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-      redirect: "error",
-      signal: boundedSignal,
-    });
-  } catch {
-    signal.throwIfAborted();
-    throw new Error("CLIProxyAPI discovery failed: connection, timeout, or redirect error.");
-  }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`CLIProxyAPI discovery failed (HTTP ${response.status}).`);
-  }
-  let payload: unknown;
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error("CLIProxyAPI discovery returned an empty response.");
-  try {
-    const decoder = new TextDecoder();
-    let text = "";
-    let size = 0;
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > 4 * 1024 * 1024) {
-        await reader.cancel();
-        throw new Error("Catalog too large.");
-      }
-      text += decoder.decode(chunk.value, { stream: true });
-    }
-    payload = JSON.parse(text + decoder.decode());
-  } catch {
-    signal.throwIfAborted();
-    throw new Error("CLIProxyAPI catalog is invalid, incomplete, or larger than 4 MiB.");
-  } finally {
-    reader.releaseLock();
-  }
-  return payload;
+// Pi's live catalogs add models released after this Pi build; bundled metadata wins for known IDs.
+export function metadataCatalog(live?: (provider: string) => readonly Model<Api>[] | undefined) {
+  const bundled = builtinCatalog();
+  if (!live) return bundled;
+  const ids = new Set(bundled.map(({ provider, id }) => `${provider}/${id}`));
+  return [
+    ...bundled,
+    ...["anthropic", "openai", "openai-codex", "google", "xai"]
+      .flatMap((provider) => live(provider) ?? [])
+      .filter(({ provider, id }) => !ids.has(`${provider}/${id}`)),
+  ];
 }
 
 export async function discover(
@@ -345,10 +312,12 @@ function route(
 
 export function createCliproxyProvider(
   config: Config,
-  known: readonly Model<Api>[] = builtinCatalog(),
+  known: readonly Model<Api>[] | (() => readonly Model<Api>[]) = builtinCatalog,
   onQuotaWait?: QuotaWaitHandler,
   compactionSignals = new WeakSet<AbortSignal>(),
 ) {
+  const metadata = typeof known === "function" ? known : () => known;
+  let skipped: string[] = [];
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
     .update(JSON.stringify([5, { baseUrl: config.baseUrl, aliases: config.aliases }]))
@@ -364,7 +333,7 @@ export function createCliproxyProvider(
           const credential = await standardAuth.login?.(interaction);
           if (!credential?.key) throw new Error("CLIProxyAPI requires an API key.");
           validateKey(credential.key);
-          await discover(config, credential.key, interaction.signal, known);
+          await discover(config, credential.key, interaction.signal, metadata());
           return credential;
         },
         async resolve(input) {
@@ -380,7 +349,15 @@ export function createCliproxyProvider(
       if (context.credential?.type !== "api_key" || !context.credential.key) {
         throw new Error("Use /login cliproxyapi or set CLIPROXYAPI_API_KEY before refreshing.");
       }
-      return (await discover(config, context.credential.key, context.signal, known)).models;
+      const payload = await fetchCatalog(config, context.credential.key, context.signal);
+      const chat = mapCatalog(payload, config, metadata());
+      skipped = chat.skipped;
+      return [...chat.models, ...mapImageModels(payload, config)];
+    },
+    images: {
+      [IMAGE_API]: {
+        generateImages: (model, context, options) => generateNativeImages(config, model, context, options),
+      },
     },
     api: {
       "anthropic-messages": route(anthropicMessagesApi(), config, compactionSignals, onQuotaWait),
@@ -392,6 +369,8 @@ export function createCliproxyProvider(
   const refresh = provider.refreshModels;
   return {
     ...provider,
+    // Chat IDs without Pi metadata from the latest network refresh, for diagnostics.
+    skippedModels: () => skipped,
     async refreshModels(context: RefreshModelsContext) {
       await refresh?.({
         ...context,

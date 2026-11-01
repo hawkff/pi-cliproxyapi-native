@@ -4,12 +4,22 @@ import * as http from "node:http";
 import * as https from "node:https";
 import { join, resolve } from "node:path";
 import { addAbortSignal, Readable } from "node:stream";
-import { type ImageContent, type Static, type TextContent, Type } from "@earendil-works/pi-ai";
+import {
+  type AssistantImages,
+  type ImageApi,
+  type ImageContent,
+  type ImageModel,
+  type ImagesContext,
+  type ImagesOptions,
+  type Static,
+  type TextContent,
+  Type,
+  type Usage,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
-import { type Config, isRecord, PROVIDER_ID } from "./config.ts";
+import { fetchCatalog, mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
+import { type Config, deadline, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
 import { type DefaultsContext, effectiveMediaDefaults, resolveMediaModel } from "./media-defaults.ts";
-import { deadline, fetchCatalog, validateKey } from "./provider.ts";
 
 type MediaContext = Pick<ExtensionContext, "cwd" | "model"> &
   DefaultsContext & {
@@ -17,6 +27,7 @@ type MediaContext = Pick<ExtensionContext, "cwd" | "model"> &
   };
 
 const MAX_INLINE_IMAGE_BASE64_BYTES = 4 * 1024 * 1024;
+const MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024;
 
 const generationParameters = Type.Object({
   model: Type.Optional(
@@ -79,6 +90,14 @@ const imageParameters = Type.Object({
         "OpenAI image count. Values above 1 require an explicit api/ route; see controls.n. Default 1.",
     }),
   ),
+  partial_images: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      maximum: 3,
+      description:
+        "OpenAI only: stream up to 3 partial previews while generating. Requires n of 1; each preview adds about 100 output tokens. Omit or 0 for none.",
+    }),
+  ),
   images: Type.Optional(
     Type.Array(Type.String({ minLength: 1 }), {
       minItems: 1,
@@ -129,6 +148,7 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     moderation: params.moderation,
     n: params.n,
     input_fidelity: params.input_fidelity,
+    partial_images: params.partial_images,
   };
   const controls = mediaControls(model);
   for (const field of [
@@ -171,6 +191,17 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     (!controls.n || !Number.isInteger(options.n) || options.n < controls.n.min || options.n > controls.n.max)
   )
     throw new Error("CLIProxyAPI n is unsupported for this route. Use an api/ image model for 2–10 images.");
+  if (
+    options.partial_images !== undefined &&
+    (!controls.partial_images ||
+      !Number.isInteger(options.partial_images) ||
+      options.partial_images < controls.partial_images.min ||
+      options.partial_images > controls.partial_images.max ||
+      (options.partial_images > 0 && (options.n ?? 1) !== 1))
+  )
+    throw new Error(
+      "CLIProxyAPI partial_images requires an OpenAI image model, n of 1, and an integer from 0 to 3.",
+    );
   if (
     options.output_compression !== undefined &&
     (!controls.output_compression ||
@@ -296,64 +327,177 @@ export async function mediaKey(ctx: Pick<MediaContext, "modelRegistry">, signal:
   }
 }
 
-function openaiImageResponse(config: Config, key: string, path: string, body: object, signal: AbortSignal) {
-  return new Promise<{ ok: boolean; status: number; body: ReturnType<typeof Readable.toWeb> | null }>(
-    (resolve, reject) => {
-      const url = new URL(`${config.baseUrl}/${path}`);
-      const transport = url.protocol === "https:" ? https : http;
-      const options = "options" in transport.globalAgent ? transport.globalAgent.options : undefined;
-      // Preserve configured proxies without inheriting the global agent's socket timeout.
-      const agent = new transport.Agent({
-        ...(isRecord(options) ? options : {}),
-        keepAlive: false,
+// Pi's native image interface can supply transport options; the image tool uses none.
+type TransportOptions = Pick<ImagesOptions, "fetch" | "headers" | "env"> & {
+  onResponse?: (response: { status: number; headers: Record<string, string> }) => unknown;
+};
+
+function requestHeaders(key: string, extra: TransportOptions["headers"] = {}) {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(extra))
+    if (value !== null && !["authorization", "content-type", "accept-encoding"].includes(name.toLowerCase()))
+      headers[name] = value;
+  return { ...headers, Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+}
+
+function openaiImageResponse(
+  config: Config,
+  key: string,
+  path: string,
+  body: unknown,
+  signal: AbortSignal,
+  { headers, env }: TransportOptions,
+) {
+  return new Promise<{
+    ok: boolean;
+    status: number;
+    headers: Record<string, string>;
+    body: ResponseBody | null;
+  }>((resolve, reject) => {
+    const url = new URL(`${config.baseUrl}/${path}`);
+    const transport = url.protocol === "https:" ? https : http;
+    const options = "options" in transport.globalAgent ? transport.globalAgent.options : undefined;
+    // Pi exports its proxy setting to the environment. Node 22.21+ and 24.5+ apply proxyEnv,
+    // including NO_PROXY; older Node versions connect directly. The global socket timeout is dropped.
+    const agent = new transport.Agent({
+      ...(isRecord(options) ? options : {}),
+      proxyEnv: { ...process.env, ...env },
+      keepAlive: false,
+      timeout: 0,
+    });
+    const connect = agent.createConnection.bind(agent);
+    agent.createConnection = (connectionOptions, callback) => {
+      // Node assigns HTTPS proxy sockets to the request only after CONNECT completes.
+      const socket = connect(connectionOptions, callback);
+      return socket ? addAbortSignal(signal, socket) : socket;
+    };
+    const request = transport.request(
+      url,
+      {
+        method: "POST",
+        agent,
         timeout: 0,
-      });
-      const connect = agent.createConnection.bind(agent);
-      agent.createConnection = (connectionOptions, callback) => {
-        // Node assigns HTTPS proxy sockets to the request only after CONNECT completes.
-        const socket = connect(connectionOptions, callback);
-        return socket ? addAbortSignal(signal, socket) : socket;
-      };
-      const request = transport.request(
-        url,
-        {
-          method: "POST",
-          agent,
-          timeout: 0,
-          signal,
-          headers: {
-            Authorization: `Bearer ${key}`,
-            "Content-Type": "application/json",
-            "Accept-Encoding": "identity",
-          },
-        },
-        (incoming) => {
-          const status = incoming.statusCode ?? 500;
-          if (status < 200 || status >= 300) {
-            incoming.destroy();
-            resolve({ ok: false, status, body: null });
-            return;
-          }
-          if (incoming.headers["content-encoding"] && incoming.headers["content-encoding"] !== "identity") {
-            incoming.destroy();
-            reject(new Error("Unsupported image response encoding."));
-            return;
-          }
-          resolve({
-            ok: true,
-            status,
-            body: Readable.toWeb(addAbortSignal(signal, incoming), { strategy: { highWaterMark: 1 } }),
-          });
-        },
-      );
-      request.on("error", reject);
-      request.on("upgrade", (incoming, socket) => {
-        socket.destroy();
-        resolve({ ok: false, status: incoming.statusCode ?? 101, body: null });
-      });
-      request.end(JSON.stringify(body));
-    },
-  );
+        signal,
+        headers: { ...requestHeaders(key, headers), "Accept-Encoding": "identity" },
+      },
+      (incoming) => {
+        const status = incoming.statusCode ?? 500;
+        const ok = status >= 200 && status < 300;
+        const received = Object.fromEntries(
+          Object.entries(incoming.headers).flatMap(([name, value]) =>
+            value === undefined ? [] : [[name, Array.isArray(value) ? value.join(", ") : value]],
+          ),
+        );
+        if (incoming.headers["content-encoding"] && incoming.headers["content-encoding"] !== "identity") {
+          incoming.destroy();
+          if (ok) reject(new Error("Unsupported image response encoding."));
+          else resolve({ ok, status, headers: received, body: null });
+          return;
+        }
+        resolve({
+          ok,
+          status,
+          headers: received,
+          body: Readable.toWeb(addAbortSignal(signal, incoming), { strategy: { highWaterMark: 1 } }),
+        });
+      },
+    );
+    request.on("error", reject);
+    request.on("upgrade", (incoming, socket) => {
+      socket.destroy();
+      resolve({ ok: false, status: incoming.statusCode ?? 101, headers: {}, body: null });
+    });
+    request.end(JSON.stringify(body));
+  });
+}
+
+type StreamReader = {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(): Promise<void>;
+};
+// Fetch and Node web streams have incompatible DOM typings; both satisfy this shape.
+type ResponseBody = { getReader(): StreamReader & { releaseLock(): void }; cancel(): Promise<void> };
+
+// Upstream errors name the rejected option or model. Show a short JSON message without credentials.
+async function errorDetail(reader: StreamReader, key: string) {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size <= 64 * 1024) {
+      const chunk = await reader.read();
+      if (chunk.done || !chunk.value) break;
+      chunks.push(chunk.value);
+      size += chunk.value.byteLength;
+    }
+    return errorText(JSON.parse(Buffer.concat(chunks).toString("utf8")), key);
+  } catch {
+    return "";
+  } finally {
+    void reader.cancel().catch(() => {});
+  }
+}
+
+function errorText(value: unknown, key: string) {
+  const error = isRecord(value) && isRecord(value.error) ? value.error : value;
+  // OpenAI-style bodies nest { message }; xAI-style bodies use a string error.
+  const message = !isRecord(error)
+    ? undefined
+    : typeof error.message === "string"
+      ? error.message
+      : typeof error.error === "string"
+        ? error.error
+        : undefined;
+  if (message === undefined) return "";
+  // Covers the proxy key, bearer tokens, and OpenAI, Anthropic, xAI, and Google key formats.
+  return message
+    .split(key)
+    .join("[redacted]")
+    .replace(/\b(?:sk-|xai-|AIza|ya29\.|Bearer\s+)[\w.~+/=-]+/gi, "[redacted]")
+    .replace(/[\p{C}\s]+/gu, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+// Server-sent events: partial previews go to the callback, other events are returned in order.
+async function readEvents(
+  reader: StreamReader,
+  maxBytes: number,
+  onPartial: (event: Record<string, unknown>) => void,
+) {
+  const decoder = new TextDecoder();
+  const events: Record<string, unknown>[] = [];
+  let buffer = "";
+  // A CRLF pair can straddle two chunks; hold a trailing CR until the next chunk arrives.
+  let carry = "";
+  let size = 0;
+  const frame = (text: string) => {
+    const data = text
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, "").replace(/\r$/, ""))
+      .join("\n");
+    if (!data || data === "[DONE]") return;
+    const event: unknown = JSON.parse(data);
+    if (!isRecord(event)) throw new Error("Invalid image event.");
+    if (typeof event.type === "string" && event.type.endsWith(".partial_image")) onPartial(event);
+    else events.push(event);
+  };
+  for (let searched = 0; ; ) {
+    const chunk = await reader.read();
+    if (chunk.done || !chunk.value) break;
+    size += chunk.value.byteLength;
+    if (size > maxBytes) throw new Error("Response too large.");
+    const text = carry + decoder.decode(chunk.value, { stream: true });
+    carry = text.endsWith("\r") ? "\r" : "";
+    buffer += (carry ? text.slice(0, -1) : text).replace(/\r\n/g, "\n");
+    for (let end = buffer.indexOf("\n\n", searched); end >= 0; end = buffer.indexOf("\n\n")) {
+      frame(buffer.slice(0, end));
+      buffer = buffer.slice(end + 2);
+    }
+    searched = Math.max(0, buffer.length - 1);
+  }
+  frame(buffer + (carry + decoder.decode()).replace(/\r\n/g, "\n"));
+  return events;
 }
 
 async function mediaRequest(
@@ -361,39 +505,65 @@ async function mediaRequest(
   key: string,
   path: string,
   signal: AbortSignal,
-  maxBytes: number,
-  body?: object,
-  openaiImage = false,
+  {
+    maxBytes,
+    body,
+    openaiImage = false,
+    onPartial,
+    ...transport
+  }: TransportOptions & {
+    maxBytes: number;
+    body?: unknown;
+    openaiImage?: boolean;
+    onPartial?: (event: Record<string, unknown>) => void;
+  },
 ) {
-  let response: Response | Awaited<ReturnType<typeof openaiImageResponse>>;
+  let response: Awaited<ReturnType<typeof openaiImageResponse>>;
   try {
-    response =
-      openaiImage && body
-        ? await openaiImageResponse(config, key, path, body, signal)
-        : await fetch(`${config.baseUrl}/${path}`, {
-            method: body ? "POST" : "GET",
-            headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-            body: body ? JSON.stringify(body) : undefined,
-            redirect: "error",
-            signal,
-          });
+    // A caller-supplied fetch replaces the dedicated image connection and owns its timeouts.
+    if (openaiImage && body && !transport.fetch)
+      response = await openaiImageResponse(config, key, path, body, signal, transport);
+    else {
+      const result = await (transport.fetch ?? fetch)(`${config.baseUrl}/${path}`, {
+        method: body ? "POST" : "GET",
+        headers: requestHeaders(key, transport.headers),
+        body: body ? JSON.stringify(body) : undefined,
+        redirect: "error",
+        signal,
+      });
+      response = {
+        ok: result.ok,
+        status: result.status,
+        headers: Object.fromEntries(result.headers),
+        body: result.body,
+      };
+    }
   } catch {
     throw new Error(
       "CLIProxyAPI media request failed: connection, cancellation, timeout, or redirect error. Generation was not retried.",
     );
   }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`CLIProxyAPI media request failed (HTTP ${response.status}).`);
+  try {
+    await transport.onResponse?.({ status: response.status, headers: response.headers });
+  } catch (error) {
+    await response.body?.cancel().catch(() => {});
+    throw error;
   }
   const reader = response.body?.getReader();
+  if (!response.ok) {
+    const detail = reader ? await errorDetail(reader, key) : "";
+    throw new Error(
+      `CLIProxyAPI media request failed (HTTP ${response.status})${detail ? `: ${detail}` : "."}`,
+    );
+  }
   if (!reader) throw new Error("CLIProxyAPI media returned an empty response.");
   try {
+    if (onPartial) return await readEvents(reader, maxBytes, onPartial);
     const chunks: Uint8Array[] = [];
     let size = 0;
     while (true) {
       const chunk = await reader.read();
-      if (chunk.done) break;
+      if (chunk.done || !chunk.value) break;
       size += chunk.value.byteLength;
       if (size > maxBytes) {
         await reader.cancel();
@@ -404,6 +574,7 @@ async function mediaRequest(
     const result: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     return result;
   } catch {
+    void reader.cancel().catch(() => {});
     throw new Error(
       "CLIProxyAPI media response is invalid, incomplete, cancelled, or exceeds the response size limit.",
     );
@@ -553,12 +724,199 @@ function parseGoogleImages(value: unknown) {
   return images;
 }
 
+// OpenAI reports image token usage. Costs use list prices and stay zero for unpriced models.
+function imageUsage(model: string, value: unknown) {
+  const tokens = (field: unknown) =>
+    typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : undefined;
+  if (!isRecord(value)) return undefined;
+  const input = tokens(value.input_tokens);
+  const output = tokens(value.output_tokens);
+  if (input === undefined || output === undefined) return undefined;
+  const imageInput = Math.min(
+    input,
+    tokens(isRecord(value.input_tokens_details) ? value.input_tokens_details.image_tokens : 0) ?? 0,
+  );
+  const [textPrice, imagePrice, outputPrice] = mediaCapability(model)?.price ?? [0, 0, 0];
+  const cost = {
+    input: ((input - imageInput) * textPrice + imageInput * imagePrice) / 1e6,
+    output: (output * outputPrice) / 1e6,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+  };
+  cost.total = cost.input + cost.output;
+  const usage: Usage = { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost };
+  return usage;
+}
+
+// Shared by the image tool and Pi's native image interface.
+async function requestImages(
+  config: Config,
+  key: string,
+  model: string,
+  request: {
+    prompt: string;
+    output: Partial<ReturnType<typeof mediaOutputOptions>>;
+    images?: { image_url: string }[];
+    mask?: { image_url: string };
+  },
+  signal: AbortSignal,
+  onPartial?: (image: ImageContent, index: number) => void,
+  { onPayload, ...transport }: TransportOptions & { onPayload?: (payload: unknown) => unknown } = {},
+) {
+  const route = mediaCapability(model)?.route;
+  const { prompt, images, mask } = request;
+  const { partial_images = 0, ...output } = request.output;
+  const n = output.n ?? 1;
+  const stream = route === "openai" && partial_images > 0;
+  const body =
+    route === "xai"
+      ? {
+          model,
+          prompt,
+          n: 1,
+          response_format: "b64_json",
+          resolution: output.resolution,
+          aspect_ratio: output.aspect_ratio,
+        }
+      : route === "openai"
+        ? { model, prompt, ...output, n, images, mask, ...(stream ? { stream, partial_images } : {}) }
+        : {
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              responseModalities: ["TEXT", "IMAGE"],
+              candidateCount: 1,
+              ...(output.resolution !== undefined || output.aspect_ratio !== undefined
+                ? { imageConfig: { imageSize: output.resolution, aspectRatio: output.aspect_ratio } }
+                : {}),
+            },
+          };
+  const payload = (await onPayload?.(body)) ?? body;
+  const path =
+    route === "gemini"
+      ? `v1beta/models/${model}:generateContent`
+      : images
+        ? "v1/images/edits"
+        : "v1/images/generations";
+  if (!stream) {
+    const result = await mediaRequest(config, key, path, signal, {
+      ...transport,
+      maxBytes: MAX_IMAGE_RESPONSE_BYTES,
+      body: payload,
+      openaiImage: route === "openai",
+    });
+    return {
+      images: route === "gemini" ? parseGoogleImages(result) : parseImages(result, n),
+      usage: route === "openai" && isRecord(result) ? imageUsage(model, result.usage) : undefined,
+    };
+  }
+  // Each frame carries one full image, so the stream may hold the final image plus every preview.
+  const events = await mediaRequest(config, key, path, signal, {
+    ...transport,
+    maxBytes: MAX_IMAGE_RESPONSE_BYTES * (1 + partial_images),
+    body: payload,
+    openaiImage: true,
+    onPartial: (event) => {
+      try {
+        const index = typeof event.partial_image_index === "number" ? event.partial_image_index : 0;
+        onPartial?.(parseImage(event).image, index);
+      } catch {
+        // A malformed preview does not affect the final image.
+      }
+    },
+  });
+  if (!Array.isArray(events)) throw new Error("CLIProxyAPI returned an invalid image stream.");
+  const failed = events.find(
+    (event) => isRecord(event) && (event.type === "error" || event.error !== undefined),
+  );
+  if (failed) {
+    const detail = errorText(failed, key);
+    throw new Error(`CLIProxyAPI image stream failed${detail ? `: ${detail}` : "."}`);
+  }
+  const completed = events.filter(
+    (event) => isRecord(event) && typeof event.type === "string" && event.type.endsWith(".completed"),
+  );
+  if (completed.length !== n) throw new Error(`CLIProxyAPI image stream must complete ${n} image(s).`);
+  return { images: completed.map(parseImage), usage: imageUsage(model, completed[0].usage) };
+}
+
+export async function generateNativeImages(
+  config: Config,
+  model: ImageModel<ImageApi>,
+  context: ImagesContext,
+  options?: ImagesOptions,
+) {
+  const result: AssistantImages = {
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    output: [],
+    stopReason: "stop",
+    timestamp: Date.now(),
+  };
+  try {
+    const capability = mediaCapability(model.id);
+    if (capability?.purpose !== "image" || capability.disabledReason)
+      throw new Error(capability?.disabledReason ?? "Choose a supported CLIProxyAPI image model.");
+    const prompt = context.input.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n\n");
+    if (!prompt.trim() || (capability.route === "openai" && prompt.length > 32000))
+      throw new Error(
+        "CLIProxyAPI requires a non-empty prompt; OpenAI prompts are limited to 32000 characters.",
+      );
+    const limits = mediaControls(model.id).editing;
+    const blocks = context.input.flatMap((block) => (block.type === "image" ? [block] : []));
+    let total = 0;
+    const images = blocks.map(({ data }) => {
+      const bytes = Buffer.from(data, "base64");
+      total += bytes.length;
+      if (
+        !limits ||
+        blocks.length > limits.max_images ||
+        bytes.length > limits.max_file_bytes ||
+        total > limits.max_total_bytes
+      )
+        throw new Error(
+          "CLIProxyAPI image inputs need an OpenAI image model: at most 16 images, 14 MiB each, 20 MiB total.",
+        );
+      let mimeType: string;
+      try {
+        ({ mimeType } = imageType(bytes));
+      } catch {
+        throw new Error("CLIProxyAPI image inputs must be PNG, JPEG, or WebP.");
+      }
+      return { image_url: `data:${mimeType};base64,${bytes.toString("base64")}` };
+    });
+    const generated = await requestImages(
+      config,
+      validateKey(options?.apiKey ?? ""),
+      model.id,
+      { prompt, output: {}, ...(images.length ? { images } : {}) },
+      deadline(options?.signal, capability.route === "openai" ? 600000 : 180000),
+      undefined,
+      {
+        fetch: options?.fetch,
+        headers: options?.headers,
+        env: options?.env,
+        onPayload: options?.onPayload && ((payload) => options.onPayload?.(payload, model)),
+        onResponse: options?.onResponse && ((response) => options.onResponse?.(response, model)),
+      },
+    );
+    result.output = generated.images.map(({ image }) => image);
+    result.usage = generated.usage;
+  } catch (error) {
+    result.stopReason = options?.signal?.aborted ? "aborted" : "error";
+    result.errorMessage = error instanceof Error ? error.message : String(error);
+  }
+  return result;
+}
+
 export async function generateImage(
   config: Config,
   params: Static<typeof imageParameters>,
   ctx: MediaContext,
   signal?: AbortSignal,
   onProgress?: (text: string) => void,
+  onPartial?: (image: ImageContent, index: number) => void,
 ) {
   const model = resolveMediaModel(config, ctx, "image", params.model);
   const route = mediaCapability(model)?.route;
@@ -577,40 +935,14 @@ export async function generateImage(
   bounded.throwIfAborted();
   onProgress?.(inputs.images ? "Editing image..." : "Generating image...");
   bounded.throwIfAborted();
-  const result = await mediaRequest(
+  const { images, usage } = await requestImages(
     config,
     key,
-    route === "gemini"
-      ? `v1beta/models/${model}:generateContent`
-      : inputs.images
-        ? "v1/images/edits"
-        : "v1/images/generations",
+    model,
+    { prompt: params.prompt, output, ...inputs },
     bounded,
-    32 * 1024 * 1024,
-    route === "xai"
-      ? {
-          model,
-          prompt: params.prompt,
-          n: 1,
-          response_format: "b64_json",
-          resolution: output.resolution,
-          aspect_ratio: output.aspect_ratio,
-        }
-      : route === "openai"
-        ? { model, prompt: params.prompt, ...output, n: output.n ?? 1, ...inputs }
-        : {
-            contents: [{ role: "user", parts: [{ text: params.prompt }] }],
-            generationConfig: {
-              responseModalities: ["TEXT", "IMAGE"],
-              candidateCount: 1,
-              ...(output.resolution !== undefined || output.aspect_ratio !== undefined
-                ? { imageConfig: { imageSize: output.resolution, aspectRatio: output.aspect_ratio } }
-                : {}),
-            },
-          },
-    route === "openai",
+    onPartial,
   );
-  const images = route === "gemini" ? parseGoogleImages(result) : parseImages(result, output.n ?? 1);
   bounded.throwIfAborted();
   onProgress?.("Saving image...");
   bounded.throwIfAborted();
@@ -647,7 +979,7 @@ export async function generateImage(
       previewBudget -= image.data.length;
     }
   }
-  return { content, details: { model, files } };
+  return { content, details: { model, files }, usage };
 }
 
 function requestId(value: unknown) {
@@ -675,12 +1007,15 @@ export async function generateVideo(
   const output = mediaOutputOptions(model, params);
   const bounded = deadline(signal, 60000);
   const key = await generationKey(config, { ...params, model }, ctx, bounded);
-  const result = await mediaRequest(config, key, "v1/videos", bounded, 64 * 1024, {
-    model,
-    prompt: params.prompt,
-    duration: params.duration,
-    resolution: output.resolution,
-    aspect_ratio: output.aspect_ratio,
+  const result = await mediaRequest(config, key, "v1/videos", bounded, {
+    maxBytes: 64 * 1024,
+    body: {
+      model,
+      prompt: params.prompt,
+      duration: params.duration,
+      resolution: output.resolution,
+      aspect_ratio: output.aspect_ratio,
+    },
   });
   if (!isRecord(result)) throw new Error("CLIProxyAPI returned an invalid video submission.");
   return { model, request_id: requestId(result.request_id), status: "pending" };
@@ -690,7 +1025,7 @@ export async function videoStatus(config: Config, id: string, ctx: MediaContext,
   const request_id = requestId(id);
   const bounded = deadline(signal, 15000);
   const key = await mediaKey(ctx, bounded);
-  const result = await mediaRequest(config, key, `v1/videos/${request_id}`, bounded, 64 * 1024);
+  const result = await mediaRequest(config, key, `v1/videos/${request_id}`, bounded, { maxBytes: 64 * 1024 });
   if (!isRecord(result)) throw new Error("CLIProxyAPI returned an invalid video status.");
   if (result.status === "pending") return { request_id, status: "pending" };
   if (result.status === "failed" || result.status === "expired") {
@@ -739,15 +1074,32 @@ export function registerMediaTools(pi: ExtensionAPI, config: Config) {
     name: "cliproxyapi_generate_image",
     label: "CLIProxyAPI image",
     description:
-      "Generate images, or edit local images with OpenAI models by supplying images and an optional mask. Supports OpenAI size, quality, background, format/compression and image count from cliproxyapi_media_models. Uses the selected model or automatic OpenAI/GPT default without changing chat. Saves final images under a new .pi/ directory with optional previews. Maximum response: 32 MiB; inline base64: 4 MiB. No automatic retries.",
+      "Generate images, or edit local images with OpenAI models by supplying images and an optional mask. Supports OpenAI size, quality, background, format/compression, image count and streamed partial previews from cliproxyapi_media_models. Uses the selected model or automatic OpenAI/GPT default without changing chat. Saves final images under a new .pi/ directory with optional previews. Maximum response: 32 MiB in total, plus 32 MiB per streamed preview; inline base64: 4 MiB. No automatic retries.",
     promptSnippet: "Generate requested raster images through CLIProxyAPI using the effective image default.",
     promptGuidelines: [
       "Use cliproxyapi_generate_image for requested raster images. Omit model to use the effective default unless a specific image model is requested; keep the current chat model.",
     ],
     parameters: imageParameters,
     async execute(_id, params, signal, onUpdate, ctx) {
-      return generateImage(config, params, ctx, signal, (text) =>
-        onUpdate?.({ content: [{ type: "text", text }], details: {} }),
+      return generateImage(
+        config,
+        params,
+        ctx,
+        signal,
+        (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
+        (image, index) => {
+          const large = image.data.length > MAX_INLINE_IMAGE_BASE64_BYTES;
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: `Partial image ${index + 1}${large ? " (preview over 4 MiB omitted)" : ""}`,
+              },
+              ...(large ? [] : [image]),
+            ],
+            details: {},
+          });
+        },
       );
     },
   });

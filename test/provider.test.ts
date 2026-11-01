@@ -24,13 +24,14 @@ import {
   Type,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
-import { mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
+import { IMAGE_API, mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
 import { claudeQuotaState, fetchClaudeQuota } from "../src/claude-quota.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
 import {
   builtinCatalog,
   createCliproxyProvider,
   discover,
+  metadataCatalog,
   nonStrictTools,
   quotaRetryAt,
 } from "../src/provider.ts";
@@ -1825,7 +1826,8 @@ test("Pi loads the package, restores its catalog offline, and sends thinking suf
           if (
             event.type === "extension_ui_request" &&
             event.method === "notify" &&
-            event.message === "CLIProxyAPI: 1 models." &&
+            event.message ===
+              "CLIProxyAPI: 1 chat models, 0 image models. Not registered (missing or ambiguous Pi metadata): unknown-fixture." &&
             event.notifyType === "info"
           )
             notified = true;
@@ -2179,4 +2181,183 @@ test("previous-policy caches cannot restore GPT-image chat aliases", async (t) =
     });
     assert.deepEqual(provider.getModels(), []);
   }
+});
+
+test("live Pi catalogs add newer metadata, bundled metadata wins, and xAI chat uses the proxy Responses route", () => {
+  const bundled = builtinCatalog();
+  const openai = bundled.find((model) => model.provider === "openai");
+  const grok = bundled.find((model) => model.provider === "xai");
+  assert.ok(openai && grok);
+  assert.deepEqual(metadataCatalog(), bundled);
+  const newer = { ...openai, id: "gpt-live-fixture" };
+  const merged = metadataCatalog((provider) =>
+    provider === "openai" ? [{ ...openai, contextWindow: 1 }, newer] : undefined,
+  );
+  assert.equal(merged.length, bundled.length + 1);
+  assert.equal(
+    merged.find((model) => model.provider === "openai" && model.id === openai.id)?.contextWindow,
+    openai.contextWindow,
+  );
+  const data = [
+    { id: newer.id, owned_by: "openai" },
+    { id: grok.id, owned_by: "xai" },
+    { id: `api/${grok.id}` },
+  ];
+  const mapped = mapCatalog({ data }, parseConfig({}), merged);
+  assert.deepEqual(mapped.skipped, []);
+  assert.deepEqual(
+    mapped.models.map(({ id, api, baseUrl, compat }) => ({
+      id,
+      api,
+      baseUrl,
+      strict: compat && "supportsStrictMode" in compat ? compat.supportsStrictMode : undefined,
+    })),
+    data.map(({ id }) => ({
+      id,
+      api: "openai-responses",
+      baseUrl: "http://localhost:8317/v1",
+      strict: false,
+    })),
+  );
+  assert.deepEqual(mapCatalog({ data: [{ id: newer.id }] }, parseConfig({}), bundled).skipped, [newer.id]);
+});
+
+test("refresh registers available image models for Pi and reports unmapped chat IDs without media", async (t) => {
+  const media = [
+    "gpt-image-2.5-sunburst",
+    "api/gpt-image-2.5",
+    "api/gpt-image-2",
+    "gemini-3-pro-image",
+    "grok-imagine-video",
+    "imagen-4.0-generate-001",
+  ];
+  const baseUrl = await server(t, (_req, res) =>
+    res.end(
+      JSON.stringify({ data: [...catalog.data, { id: "future-fixture" }, ...media.map((id) => ({ id }))] }),
+    ),
+  );
+  const { models, provider } = await collection(baseUrl);
+  assert.equal((await models.refresh()).errors.size, 0);
+  assert.equal(provider.getModels().length, 5);
+  assert.deepEqual(provider.skippedModels(), ["future-fixture"]);
+  const images = models.getModelsOfType("image", PROVIDER_ID);
+  assert.deepEqual(
+    images.map(({ id, api, input, output, baseUrl }) => ({ id, api, input, output, baseUrl })),
+    [
+      ["gpt-image-2.5-sunburst", ["text", "image"]],
+      ["api/gpt-image-2", ["text", "image"]],
+      ["gemini-3-pro-image", ["text"]],
+    ].map(([id, input]) => ({ id, api: IMAGE_API, input, output: ["image"], baseUrl })),
+  );
+  assert.deepEqual(images[0].cost, { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 });
+  assert.deepEqual(images[2].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
+test("Pi image calls reuse proxy validation, honor payload hooks, report usage, and return errors as results", async (t) => {
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
+  const id = "api/gpt-image-2.5-sunburst";
+  const bodies: { path: string | undefined; body: unknown }[] = [];
+  const tenants: unknown[] = [];
+  let status = 200;
+  const baseUrl = await server(t, (req, res) => {
+    assert.equal(req.headers.authorization, `Bearer ${key}`);
+    tenants.push(req.headers["x-tenant"]);
+    if (req.method === "GET")
+      return void res.end(JSON.stringify({ data: [{ id }, { id: "gemini-3-pro-image" }] }));
+    let text = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      text += chunk;
+    });
+    req.on("end", () => {
+      bodies.push({ path: req.url, body: JSON.parse(text) });
+      if (status !== 200)
+        return void res
+          .writeHead(status, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: { message: `Rejected for ${key}` } }));
+      res.end(
+        JSON.stringify({
+          data: [{ b64_json: png }],
+          usage: {
+            input_tokens: 60,
+            input_tokens_details: { text_tokens: 10, image_tokens: 50 },
+            output_tokens: 1000,
+            total_tokens: 1060,
+          },
+        }),
+      );
+    });
+  });
+  const { models } = await collection(baseUrl);
+  await models.refresh();
+  const image = models.getModelOfType("image", PROVIDER_ID, id);
+  assert.ok(image);
+  const generated = await models.generateImages(
+    image,
+    {
+      input: [
+        { type: "text", text: "fixture" },
+        { type: "image", data: png, mimeType: "image/png" },
+      ],
+    },
+    { onPayload: (payload) => (isRecord(payload) ? { ...payload, quality: "low" } : payload) },
+  );
+  assert.equal(generated.stopReason, "stop", generated.errorMessage);
+  assert.deepEqual(generated.output, [{ type: "image", data: png, mimeType: "image/png" }]);
+  assert.deepEqual(bodies[0], {
+    path: "/v1/images/edits",
+    body: {
+      model: id,
+      prompt: "fixture",
+      n: 1,
+      images: [{ image_url: `data:image/png;base64,${png}` }],
+      quality: "low",
+    },
+  });
+  assert.equal(generated.usage?.totalTokens, 1060);
+  assert.ok(Math.abs((generated.usage?.cost.total ?? 0) - (10 * 5 + 50 * 8 + 1000 * 30) / 1e6) < 1e-12);
+  const fetched: string[] = [];
+  const statuses: number[] = [];
+  const routed = await models.generateImages(
+    image,
+    { input: [{ type: "text", text: "fixture" }] },
+    {
+      headers: { "x-tenant": "fixture", authorization: "Bearer wrong-fixture" },
+      fetch: (input, init) => {
+        fetched.push(String(input));
+        return fetch(input, init);
+      },
+      onResponse: (response) => {
+        statuses.push(response.status);
+      },
+    },
+  );
+  assert.equal(routed.stopReason, "stop", routed.errorMessage);
+  assert.deepEqual(fetched, [`${baseUrl}/v1/images/generations`]);
+  assert.deepEqual(statuses, [200]);
+  assert.equal(tenants.at(-1), "fixture");
+  assert.equal(tenants[0], undefined);
+  status = 400;
+  const failed = await models.generateImages(image, { input: [{ type: "text", text: "fixture" }] });
+  assert.equal(failed.stopReason, "error");
+  assert.equal(failed.errorMessage, "CLIProxyAPI media request failed (HTTP 400): Rejected for [redacted]");
+  const gemini = models.getModelOfType("image", PROVIDER_ID, "gemini-3-pro-image");
+  assert.ok(gemini);
+  const refused = await models.generateImages(gemini, {
+    input: [
+      { type: "text", text: "fixture" },
+      { type: "image", data: png, mimeType: "image/png" },
+    ],
+  });
+  assert.equal(refused.stopReason, "error");
+  assert.match(refused.errorMessage ?? "", /OpenAI image model/);
+  const empty = await models.generateImages(image, { input: [{ type: "text", text: " " }] });
+  assert.match(empty.errorMessage ?? "", /non-empty prompt/);
+  const aborted = await models.generateImages(
+    image,
+    { input: [{ type: "text", text: "fixture" }] },
+    { signal: AbortSignal.abort() },
+  );
+  assert.equal(aborted.stopReason, "aborted");
+  assert.equal(bodies.length, 3);
 });

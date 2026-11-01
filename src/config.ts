@@ -9,6 +9,17 @@ export function isModelId(value: unknown): value is string {
   return typeof value === "string" && /^[!-~]{1,256}$/.test(value);
 }
 
+export function validateKey(key: string) {
+  if (!/^[!-~]{1,4096}$/.test(key)) {
+    throw new Error("CLIProxyAPI requires a non-empty API key without whitespace or control characters.");
+  }
+  return key;
+}
+
+export function deadline(signal: AbortSignal | undefined, milliseconds: number) {
+  return AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(milliseconds)]);
+}
+
 export function normalizeBaseUrl(value: string) {
   let url: URL;
   try {
