@@ -40,6 +40,7 @@ const ids = [
   "grok-imagine-image-2.0",
   "grok-imagine-video",
   "grok-imagine-video-1.5",
+  "grok-imagine-video-1.5-lite",
   videoModel,
 ];
 const catalog = { data: ids.map((id) => ({ id, owned_by: "xai" })) };
@@ -95,7 +96,7 @@ async function body(req: IncomingMessage) {
   return value;
 }
 
-test("media catalog maps six exact IDs, excludes hidden and unknown IDs, and cannot seed chat aliases", () => {
+test("media catalog maps seven exact IDs, excludes hidden and unknown IDs, and cannot seed chat aliases", () => {
   assert.deepEqual(
     mapMediaCatalog(catalog),
     ids.map((id, index) => ({
@@ -147,7 +148,7 @@ test("media discovery stays live and generation requires an explicit available m
     }),
   });
   const ctx = context(await home(t));
-  assert.equal((await listMediaModels(config, ctx)).length, 6);
+  assert.equal((await listMediaModels(config, ctx)).length, ids.length);
   for (const model of ["", "gpt-image-1", videoModel, `xai/${imageModel}`, "team-image"]) {
     await assert.rejects(
       generateImage(config, { model, prompt: "fixture" }, ctx),
@@ -488,7 +489,7 @@ test("Pi loads and executes all four media tools with registry auth without chat
     const ctx = { cwd: process.cwd(), model: undefined, modelRegistry: new ModelRegistry(runtime) };
     const call = (index, params) => tools[index].execute('fixture', params, AbortSignal.timeout(5000), undefined, ctx);
     const listed = await call(0, {});
-    assert.equal(listed.details.models.length, 6);
+    assert.equal(listed.details.models.length, ${ids.length});
     const image = await call(1, { model: ${JSON.stringify(imageModel)}, prompt: 'fixture' });
     assert.equal(image.details.files[0].mimeType, 'image/png');
     const video = await call(2, { model: ${JSON.stringify(videoModel)}, prompt: 'fixture', duration: 1 });
@@ -1487,6 +1488,7 @@ test("media discovery reports model-specific output controls and preserves quali
     assert.ok(!controls(imageModel).aspect_ratio.includes(ratio));
   assert.deepEqual(controls("grok-imagine-video").resolution, ["480p", "720p"]);
   assert.deepEqual(controls(videoModel).resolution, ["480p", "720p", "1080p"]);
+  assert.deepEqual(controls("grok-imagine-video-1.5-lite").resolution, ["480p", "720p", "1080p"]);
   for (const id of ["unknown", "vertex/gpt-image-2", `vertex/${videoModel}`, ...qualifiedRetiredIds]) {
     const unavailable = mediaControls(id);
     assert.deepEqual(unavailable.size, []);

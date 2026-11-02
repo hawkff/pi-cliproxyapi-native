@@ -134,6 +134,7 @@ const mediaModels = new Map<
   ["grok-imagine-image-2.0", { name: "Grok Imagine Image 2.0", purpose: "image", route: "xai" }],
   ["grok-imagine-video", { name: "Grok Imagine Video", purpose: "video", route: "xai" }],
   ["grok-imagine-video-1.5", { name: "Grok Imagine Video 1.5", purpose: "video", route: "xai" }],
+  ["grok-imagine-video-1.5-lite", { name: "Grok Imagine Video 1.5 Lite", purpose: "video", route: "xai" }],
   [
     "grok-imagine-video-1.5-preview",
     { name: "Grok Imagine Video 1.5 Preview", purpose: "video", route: "xai" },
