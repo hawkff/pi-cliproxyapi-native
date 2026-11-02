@@ -1371,7 +1371,9 @@ test("management quota failures reject redirects and oversized bodies without ex
 });
 
 test("account pools use the earliest eligible reset and do not confuse weekly-blocked accounts with available ones", async (t) => {
-  const now = Date.now();
+  // A whole-second clock matches the HTTP Date header, which drops milliseconds.
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  t.mock.timers.enable({ apis: ["Date"], now });
   const config = parseConfig({ baseUrl: "https://proxy.example/gateway" });
   const seen = mockClaudeManagement(t, config.baseUrl, (account) =>
     claudeUsage(now + (account === "weekly" ? 10000 : 20000), 100, account === "weekly" ? 100 : 10),
@@ -1390,7 +1392,7 @@ test("account pools use the earliest eligible reset and do not confuse weekly-bl
   assert.equal(quota.state, "blocked");
   assert.equal(quota.weeklyResetAt, undefined);
   assert.equal(seen.calls, 2);
-  assert.ok(quota.retryAt !== undefined && quota.retryAt >= now + 21000 && quota.retryAt < now + 22000);
+  assert.equal(quota.retryAt, now + 21000);
 });
 
 test("one malformed account does not hide usable quota in the rest of the pool", async (t) => {
