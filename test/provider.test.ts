@@ -21,9 +21,9 @@ import {
   isRetryableAssistantError,
   type Model,
   normalizeContext,
-  Type,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { IMAGE_API, mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
 import { claudeQuotaState, fetchClaudeQuota } from "../src/claude-quota.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";

@@ -4,19 +4,18 @@ import * as http from "node:http";
 import * as https from "node:https";
 import { join, resolve } from "node:path";
 import { addAbortSignal, Readable } from "node:stream";
-import {
-  type AssistantImages,
-  type ImageApi,
-  type ImageContent,
-  type ImageModel,
-  type ImagesContext,
-  type ImagesOptions,
-  type Static,
-  type TextContent,
-  Type,
-  type Usage,
+import type {
+  AssistantImages,
+  ImageApi,
+  ImageContent,
+  ImageModel,
+  ImagesContext,
+  ImagesOptions,
+  TextContent,
+  Usage,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import { fetchCatalog, mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
 import { type Config, deadline, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
 import { type DefaultsContext, effectiveMediaDefaults, resolveMediaModel } from "./media-defaults.ts";
