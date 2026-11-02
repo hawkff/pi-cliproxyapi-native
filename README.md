@@ -31,15 +31,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.4.0 and CLIProxyAPI 8.0.48, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.5.0 and CLIProxyAPI 8.0.51, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.3
+pi install npm:pi-cliproxyapi-native@0.3.4
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.3`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.4`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -129,12 +129,12 @@ Invalid or disabled saved selections block automatic fallback until you clear or
 
 Pass output controls for each generation, or omit them to keep the backend defaults. `cliproxyapi_media_models` lists each model's `controls.size`, `controls.resolution`, and `controls.aspect_ratio`. Empty lists mean the control is unsupported; `size_limits` describes custom pixel sizes beyond the listed presets.
 
-| Models        | Controls                                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------------------------------- |
-| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`.                                 |
-| Gemini images | `aspect_ratio` and model-specific `resolution` tiers.                                                         |
-| xAI images    | `resolution`: `1k` or `2k`, plus `aspect_ratio`.                                                              |
-| xAI videos    | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model and its preview alias also accept `1080p`. |
+| Models        | Controls                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| OpenAI images | `size`: `auto` or `WIDTHxHEIGHT`. No separate `resolution` or `aspect_ratio`.                                            |
+| Gemini images | `aspect_ratio` and model-specific `resolution` tiers.                                                                    |
+| xAI images    | `resolution`: `1k` or `2k`, plus `aspect_ratio`.                                                                         |
+| xAI videos    | `resolution`: `480p` or `720p`, plus `aspect_ratio`. The 1.5 model, its preview alias, and 1.5 Lite also accept `1080p`. |
 
 GPT Image 1.5 accepts `auto`, `1024x1024`, `1536x1024`, and `1024x1536`. GPT Image 2 and 2.5 also accept custom dimensions: both edges must be multiples of 16 and at most 3840 pixels. The longer edge cannot exceed three times the shorter one. Total pixels must be between 655,360 and 8,294,400. OpenAI marks resolutions above `2560x1440` as experimental.
 
@@ -196,11 +196,11 @@ These calls send the prompt with backend defaults. Pi's image interface has no s
 
 Your proxy must advertise the exact ID for a model to be available.
 
-| Provider      | Models                                                                                                                                                         |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5`                                                               |
-| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image`                                                        |
-| xAI models    | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-preview` |
+| Provider      | Models                                                                                                                                                                                        |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI models | `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`, `gpt-image-2.5`, `gpt-image-2`, `gpt-image-1.5`                                                                                              |
+| Google models | `gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-3.1-flash-lite-image`                                                                                       |
+| xAI models    | `grok-imagine-image`, `grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video`, `grok-imagine-video-1.5`, `grok-imagine-video-1.5-lite`, `grok-imagine-video-1.5-preview` |
 
 Supported media IDs can also use advertised `api/` and `oauth/` credential routes. OpenAI's API has no plain `gpt-image-2.5`, so the picker disables `api/gpt-image-2.5` and points to Sunburst or Flare; subscription routes keep it. Gemini image models also support `vertex/` and `antigravity/` backend routes. Those backend prefixes do not enable OpenAI or xAI media execution; the picker shows those entries as disabled. Other prefixes, nested prefixes, media aliases, unknown media IDs, Google Veo, and non-OpenAI editing are unsupported.
 
