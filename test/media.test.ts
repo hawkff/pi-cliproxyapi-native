@@ -1870,6 +1870,8 @@ test("invalid OpenAI controls and edit inputs fail before authentication or netw
     { model: image26, output_format: "gif", partial_images: 1 },
     { model: image26, output_format: "svg", partial_images: 2 },
     { model: image26, output_format: "gif", output_compression: 50 },
+    { model: image26, output_format: "gif", background: "transparent" },
+    { model: image26, output_format: "svg", background: "transparent" },
     { model: image26, frame_count: 4 },
     { model: image26, output_format: "png", frame_duration_ms: 100 },
     { model: image26, output_format: "gif", frame_count: 1 },
@@ -2170,7 +2172,12 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
   const author = getBuiltinModels("openai").find(({ cost }) => cost.input > 0 && cost.output > 0);
   assert.ok(author);
   const root =
-    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><rect width="16" height="16" fill="url(#g)"/><use xlink:href="#r"/></svg>';
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><title>Field &amp; Flour</title><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><g fill="url(#g)"><path d="M0 0h16v16H0z"/></g><text x="8" y="12" font-family="Arial">BAKERY &#169;</text><use xlink:href="#r"/></svg>';
+  const corrupt = (data: string, offset: number) => {
+    const bytes = Buffer.from(data, "base64");
+    bytes[offset] |= 0x80;
+    return bytes.toString("base64");
+  };
   const usage = {
     input_tokens: 60,
     input_tokens_details: { text_tokens: 10, image_tokens: 50 },
@@ -2247,6 +2254,9 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
   for (const [output_format, data] of [
     ["gif", png],
     ["gif", Buffer.from("GIF89a").toString("base64")],
+    ["gif", corrupt(gif, 0)],
+    ["png", corrupt(png, 12)],
+    ["webp", corrupt(webp, 0)],
     ["svg", png],
     ["svg", Buffer.from("<svg>\u00ff</svg>", "latin1").toString("base64")],
     ["svg", svg('<svg xmlns="http://www.w3.org/2000/svg">')],
@@ -2262,6 +2272,13 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
       '<style>@import "https://media.example/x.css";</style>',
       '<set attributeName="fill" to="red"/>',
       "<foreignObject><div/></foreignObject>",
+      '<s:script xmlns:s="http://www.w3.org/2000/svg">alert(1)</s:script>',
+      '<g xmlns="http://www.w3.org/1999/xhtml"><iframe src="https://media.example/"/></g>',
+      '<style>@\\69mport "https://media.example/x.css";</style>',
+      '<rect style="fill:u&#114;l(https://media.example/x)"/>',
+      "<rect style=\"fill:image-set('https://media.example/x.png' 1x)\"/>",
+      "<style><![CDATA[rect{fill:red}]]></style>",
+      '<a href="#r"><rect/></a>',
     ].map((element) => ["svg", svg(`<svg xmlns="http://www.w3.org/2000/svg">${element}</svg>`)]),
   ]) {
     response = { data: [{ b64_json: data }] };

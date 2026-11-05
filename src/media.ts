@@ -263,7 +263,11 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     throw new Error(
       "CLIProxyAPI output_compression requires jpeg or webp output_format and an integer from 0 to 100.",
     );
-  if (options.background === "transparent" && options.output_format === "jpeg")
+  if (
+    options.background === "transparent" &&
+    options.output_format !== undefined &&
+    !["png", "webp"].includes(options.output_format)
+  )
     throw new Error("CLIProxyAPI transparent backgrounds require png or webp output_format.");
   if (options.input_fidelity !== undefined && params.images === undefined)
     throw new Error("CLIProxyAPI input_fidelity requires editing images.");
@@ -673,7 +677,7 @@ function imageType(bytes: Buffer) {
   if (
     bytes.length > 24 &&
     bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) &&
-    bytes.toString("ascii", 12, 16) === "IHDR"
+    bytes.toString("latin1", 12, 16) === "IHDR"
   ) {
     extension = "png";
     mimeType = "image/png";
@@ -689,8 +693,8 @@ function imageType(bytes: Buffer) {
     mimeType = "image/jpeg";
   } else if (
     bytes.length > 20 &&
-    bytes.toString("ascii", 0, 4) === "RIFF" &&
-    bytes.toString("ascii", 8, 12) === "WEBP" &&
+    bytes.toString("latin1", 0, 4) === "RIFF" &&
+    bytes.toString("latin1", 8, 12) === "WEBP" &&
     bytes.readUInt32LE(4) + 8 === bytes.length
   ) {
     extension = "webp";
@@ -701,14 +705,24 @@ function imageType(bytes: Buffer) {
   return { extension, mimeType };
 }
 
-// OpenAI documents static SVG; reject scripts, animation, entities, and references outside the document.
+// OpenAI documents static SVG without scripts, external resources, or raster images. Only static drawing
+// elements and same-document references pass; anything the checks cannot read fails closed.
+const svgElements = new Set(
+  `svg g defs title desc symbol use style path rect circle ellipse line polyline polygon text tspan textPath
+  linearGradient radialGradient stop pattern clipPath mask marker filter feBlend feColorMatrix feComponentTransfer
+  feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap feDistantLight feDropShadow feFlood feFuncA
+  feFuncB feFuncG feFuncR feGaussianBlur feMerge feMergeNode feMorphology feOffset fePointLight
+  feSpecularLighting feSpotLight feTile feTurbulence`.split(/\s+/),
+);
+// Matches declarations, CDATA, processing instructions, event handlers, CSS escapes and imports, foreign
+// namespaces, and references outside the document.
 const unsafeSvg =
-  /<(?:script|foreignObject|image|iframe|embed|object|set|animate\w*|!DOCTYPE|!ENTITY)\b|\son[a-z]+\s*=|javascript:|@import|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\(\s*(?:"(?!#)|'(?!#)|[^"'\s#)])/i;
+  /<[!?]|\son[a-z]+\s*=|\\|@import|image-set\(|xmlns(?::[\w.-]+)?\s*=\s*["'](?!http:\/\/www\.w3\.org\/(?:2000\/svg|1999\/xlink)["'])|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\(\s*(?:"(?!#)|'(?!#)|[^"'\s#)])/i;
 
 // Accept GIF or SVG only when the request asked GPT Image 2.6 for that format.
 function outputType(bytes: Buffer, format?: string) {
   if (format === "gif") {
-    if (bytes.length > 13 && /^GIF8[79]a$/.test(bytes.toString("ascii", 0, 6)) && bytes.at(-1) === 0x3b)
+    if (bytes.length > 13 && /^GIF8[79]a$/.test(bytes.toString("latin1", 0, 6)) && bytes.at(-1) === 0x3b)
       return { extension: "gif", mimeType: "image/gif" };
     throw new Error("CLIProxyAPI returned a malformed GIF.");
   }
@@ -719,8 +733,21 @@ function outputType(bytes: Buffer, format?: string) {
   } catch {
     throw new Error("CLIProxyAPI returned an SVG that is not valid UTF-8.");
   }
-  const root = text.replace(/^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*)*/, "").trimEnd();
-  if (!/^<svg[\s>]/.test(root) || !root.endsWith("</svg>") || unsafeSvg.test(text))
+  // Comments cannot run, and decoding character references keeps them from hiding text from the checks.
+  const body = text
+    .replace(/^\s*<\?xml[^>]*\?>/, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/&#(x[\da-f]+|\d+);?/gi, (_, code: string) => {
+      const point = /^x/i.test(code) ? Number.parseInt(code.slice(1), 16) : Number(code);
+      return point <= 0x10ffff ? String.fromCodePoint(point) : "\\";
+    })
+    .trim();
+  if (
+    !/^<svg[\s>]/.test(body) ||
+    !body.endsWith("</svg>") ||
+    unsafeSvg.test(body) ||
+    [...body.matchAll(/<\/?([^\s/>]*)/g)].some(([, name]) => !svgElements.has(name))
+  )
     throw new Error("CLIProxyAPI returned a malformed SVG or one with active or external content.");
   return { extension: "svg", mimeType: "image/svg+xml" };
 }
@@ -905,11 +932,13 @@ async function requestImages(
       body: payload,
       openaiImage: route === "openai",
     });
+    // Decode the format actually requested, which a native payload hook may have changed.
+    const format =
+      route === "openai" && isRecord(payload) && typeof payload.output_format === "string"
+        ? payload.output_format
+        : undefined;
     return {
-      images:
-        route === "gemini"
-          ? parseGoogleImages(result)
-          : parseImages(result, n, route === "openai" ? output.output_format : undefined),
+      images: route === "gemini" ? parseGoogleImages(result) : parseImages(result, n, format),
       usage:
         route === "openai" && isRecord(result)
           ? imageUsage(model, result.usage, result.svg_usage)
