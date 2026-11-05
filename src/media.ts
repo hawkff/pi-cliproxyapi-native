@@ -14,6 +14,7 @@ import type {
   TextContent,
   Usage,
 } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { fetchCatalog, mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
@@ -65,19 +66,42 @@ const imageParameters = Type.Object({
       description: "OpenAI quality from controls.quality; Sunburst and Flare also support xhigh and max.",
     }),
   ),
+  complexity: Type.Optional(
+    Type.String({
+      description:
+        "GPT Image 2.6 Sunburst/Flare planning effort: low, medium, or high (upstream default high). Low suits quick edits.",
+    }),
+  ),
   background: Type.Optional(
     Type.String({
       description: "OpenAI background: auto, opaque, or transparent. Transparency requires PNG or WebP.",
     }),
   ),
   output_format: Type.Optional(
-    Type.String({ description: "OpenAI output format: png, jpeg, or webp. Omit for the backend default." }),
+    Type.String({
+      description:
+        "OpenAI output format: png, jpeg, or webp. GPT Image 2.6 Sunburst/Flare also generate gif and svg (svg needs n of 1). Omit for the backend default.",
+    }),
   ),
   output_compression: Type.Optional(
     Type.Integer({
       minimum: 0,
       maximum: 100,
       description: "OpenAI JPEG/WebP compression, 0–100. Requires an explicit jpeg or webp output_format.",
+    }),
+  ),
+  frame_count: Type.Optional(
+    Type.Integer({
+      minimum: 2,
+      maximum: 16,
+      description: "GIF output only: number of frames, 2–16 (upstream default 9).",
+    }),
+  ),
+  frame_duration_ms: Type.Optional(
+    Type.Integer({
+      minimum: 20,
+      maximum: 2000,
+      description: "GIF output only: milliseconds per frame, 20–2000, rounded to 10 (upstream default 200).",
     }),
   ),
   moderation: Type.Optional(Type.String({ description: "OpenAI moderation: auto or low." })),
@@ -112,6 +136,13 @@ const imageParameters = Type.Object({
         "Optional local PNG mask for images[0]. The first image must also be PNG with matching dimensions; mask must have an alpha channel. Transparent regions are edited.",
     }),
   ),
+  markup: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Optional local PNG annotation layer for images[0] with GPT Image 2.5/2.6 Sunburst or Flare: transparent except for marks showing where to edit. Same size as images[0]; cannot be combined with mask.",
+    }),
+  ),
   input_fidelity: Type.Optional(
     Type.String({
       description: "Editing fidelity for GPT Image 1.5 only: low or high. Omit for other models.",
@@ -122,7 +153,7 @@ const imageParameters = Type.Object({
       minLength: 1,
       maxLength: 32,
       description:
-        "OpenAI image size: auto or WIDTHxHEIGHT. Use controls.size and controls.size_limits from cliproxyapi_media_models. Omit to preserve the backend default.",
+        "OpenAI image size: auto or WIDTHxHEIGHT. Use controls.size and controls.size_limits from cliproxyapi_media_models; GIF sizes are per frame and may go below min_pixels. Omit to preserve the backend default.",
     }),
   ),
 });
@@ -141,6 +172,7 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     resolution: params.resolution,
     aspect_ratio: params.aspect_ratio,
     quality: params.quality,
+    complexity: params.complexity,
     background: params.background,
     output_format: params.output_format,
     output_compression: params.output_compression,
@@ -148,13 +180,19 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     n: params.n,
     input_fidelity: params.input_fidelity,
     partial_images: params.partial_images,
+    frame_count: params.frame_count,
+    frame_duration_ms: params.frame_duration_ms,
   };
   const controls = mediaControls(model);
+  const gif = options.output_format === "gif";
+  // OpenAI generates GIF and SVG without streaming and only on the generation endpoint.
+  const generationOnly = gif || options.output_format === "svg";
   for (const field of [
     "size",
     "resolution",
     "aspect_ratio",
     "quality",
+    "complexity",
     "background",
     "output_format",
     "moderation",
@@ -175,7 +213,7 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
           height % limits.multiple_of === 0 &&
           Math.max(width, height) <= limits.max_edge &&
           Math.max(width, height) / Math.min(width, height) <= limits.max_aspect_ratio &&
-          pixels >= limits.min_pixels &&
+          (gif || pixels >= limits.min_pixels) &&
           pixels <= limits.max_pixels
         )
           continue;
@@ -196,11 +234,24 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
       !Number.isInteger(options.partial_images) ||
       options.partial_images < controls.partial_images.min ||
       options.partial_images > controls.partial_images.max ||
-      (options.partial_images > 0 && (options.n ?? 1) !== 1))
+      (options.partial_images > 0 && ((options.n ?? 1) !== 1 || generationOnly)))
   )
     throw new Error(
-      "CLIProxyAPI partial_images requires an OpenAI image model, n of 1, and an integer from 0 to 3.",
+      "CLIProxyAPI partial_images requires an OpenAI image model, n of 1, PNG, JPEG, or WebP output, and an integer from 0 to 3.",
     );
+  for (const field of ["frame_count", "frame_duration_ms"] as const) {
+    const value = options[field];
+    const range = controls.gif?.[field];
+    if (
+      value !== undefined &&
+      (!gif || !range || !Number.isInteger(value) || value < range.min || value > range.max)
+    )
+      throw new Error(`CLIProxyAPI ${field} requires gif output_format and a value within controls.gif.`);
+  }
+  if (options.output_format === "svg" && (options.n ?? 1) !== 1)
+    throw new Error("CLIProxyAPI svg output_format requires n of 1.");
+  if (generationOnly && params.images !== undefined)
+    throw new Error("CLIProxyAPI gif and svg output_format are for generation, not editing.");
   if (
     options.output_compression !== undefined &&
     (!controls.output_compression ||
@@ -226,7 +277,8 @@ async function imageInputs(
   signal: AbortSignal,
 ) {
   if (params.images === undefined) {
-    if (params.mask !== undefined) throw new Error("CLIProxyAPI mask requires editing images.");
+    if (params.mask !== undefined || params.markup !== undefined)
+      throw new Error("CLIProxyAPI mask and markup require editing images.");
     return {};
   }
   const limits = mediaControls(model).editing;
@@ -237,14 +289,18 @@ async function imageInputs(
     params.images.length > limits.max_images
   )
     throw new Error("CLIProxyAPI editing requires 1–16 local images and a supported OpenAI image model.");
+  if (params.markup !== undefined && (params.mask !== undefined || !limits.markup))
+    throw new Error(
+      "CLIProxyAPI markup requires GPT Image 2.5 or 2.6 Sunburst or Flare and cannot be combined with mask.",
+    );
+  // The mask or markup layer follows the input images.
+  const layer = params.mask ?? params.markup;
   const images: { image_url: string }[] = [];
   let mask: { image_url: string } | undefined;
+  let markup: { image_url: string } | undefined;
   let firstPngDimensions: Buffer | undefined;
   let total = 0;
-  for (const [index, path] of [
-    ...params.images,
-    ...(params.mask === undefined ? [] : [params.mask]),
-  ].entries()) {
+  for (const [index, path] of [...params.images, ...(layer === undefined ? [] : [layer])].entries()) {
     signal.throwIfAborted();
     if (
       typeof path !== "string" ||
@@ -285,22 +341,25 @@ async function imageInputs(
     } catch {
       throw new Error(`CLIProxyAPI editing input "${path}" is not a supported PNG, JPEG, or WebP image.`);
     }
-    const isMask = index === params.images.length;
+    const isLayer = index === params.images.length;
     if (index === 0 && mimeType === "image/png") firstPngDimensions = bytes.subarray(16, 24);
+    // Masks need a matching PNG first image; OpenAI checks markup on JPEG or WebP images after orientation.
+    const sameSize = firstPngDimensions?.equals(bytes.subarray(16, 24));
     if (
-      isMask &&
+      isLayer &&
       (mimeType !== "image/png" ||
-        !firstPngDimensions?.equals(bytes.subarray(16, 24)) ||
-        ![4, 6].includes(bytes[25]))
+        ![4, 6].includes(bytes[25]) ||
+        (sameSize === undefined ? params.mask !== undefined : !sameSize))
     )
       throw new Error(
-        "CLIProxyAPI mask and first image must be matching-size PNGs; the mask needs an alpha channel.",
+        "CLIProxyAPI mask and markup layers must be alpha-channel PNGs matching a PNG first image's size; masks need a PNG first image.",
       );
     const input = { image_url: `data:${mimeType};base64,${bytes.toString("base64")}` };
-    if (isMask) mask = input;
-    else images.push(input);
+    if (!isLayer) images.push(input);
+    else if (params.mask !== undefined) mask = input;
+    else markup = input;
   }
-  return { images, mask };
+  return { images, mask, markup };
 }
 
 export async function mediaKey(ctx: Pick<MediaContext, "modelRegistry">, signal: AbortSignal) {
@@ -642,7 +701,31 @@ function imageType(bytes: Buffer) {
   return { extension, mimeType };
 }
 
-function parseImage(entry: unknown) {
+// OpenAI documents static SVG; reject scripts, animation, entities, and references outside the document.
+const unsafeSvg =
+  /<(?:script|foreignObject|image|iframe|embed|object|set|animate\w*|!DOCTYPE|!ENTITY)\b|\son[a-z]+\s*=|javascript:|@import|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\(\s*(?:"(?!#)|'(?!#)|[^"'\s#)])/i;
+
+// Accept GIF or SVG only when the request asked GPT Image 2.6 for that format.
+function outputType(bytes: Buffer, format?: string) {
+  if (format === "gif") {
+    if (bytes.length > 13 && /^GIF8[79]a$/.test(bytes.toString("ascii", 0, 6)) && bytes.at(-1) === 0x3b)
+      return { extension: "gif", mimeType: "image/gif" };
+    throw new Error("CLIProxyAPI returned a malformed GIF.");
+  }
+  if (format !== "svg") return imageType(bytes);
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("CLIProxyAPI returned an SVG that is not valid UTF-8.");
+  }
+  const root = text.replace(/^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*)*/, "").trimEnd();
+  if (!/^<svg[\s>]/.test(root) || !root.endsWith("</svg>") || unsafeSvg.test(text))
+    throw new Error("CLIProxyAPI returned a malformed SVG or one with active or external content.");
+  return { extension: "svg", mimeType: "image/svg+xml" };
+}
+
+function parseImage(entry: unknown, format?: string) {
   if (!isRecord(entry) || typeof entry.b64_json !== "string") {
     throw new Error("CLIProxyAPI did not return b64_json image data. URL-only images are not downloaded.");
   }
@@ -651,12 +734,12 @@ function parseImage(entry: unknown) {
   if (!encoded || bytes.toString("base64") !== encoded) {
     throw new Error("CLIProxyAPI returned invalid base64 image data.");
   }
-  const { extension, mimeType } = imageType(bytes);
+  const { extension, mimeType } = outputType(bytes, format);
   const image: ImageContent = { type: "image", data: encoded, mimeType };
   return { bytes, extension, image };
 }
 
-function parseImages(value: unknown, count: number) {
+function parseImages(value: unknown, count: number, format?: string) {
   if (
     !isRecord(value) ||
     value.error !== undefined ||
@@ -664,7 +747,7 @@ function parseImages(value: unknown, count: number) {
     value.data.length !== count
   )
     throw new Error(`CLIProxyAPI image response must contain ${count} image(s).`);
-  return value.data.map(parseImage);
+  return value.data.map((entry: unknown) => parseImage(entry, format));
 }
 
 function parseGoogleImages(value: unknown) {
@@ -727,7 +810,7 @@ function parseGoogleImages(value: unknown) {
 }
 
 // OpenAI reports image token usage. Costs use list prices and stay zero for unpriced models.
-function imageUsage(model: string, value: unknown) {
+function imageUsage(model: string, value: unknown, svg?: unknown) {
   const tokens = (field: unknown) =>
     typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : undefined;
   if (!isRecord(value)) return undefined;
@@ -746,8 +829,22 @@ function imageUsage(model: string, value: unknown) {
     cacheWrite: 0,
     total: 0,
   };
-  cost.total = cost.input + cost.output;
   const usage: Usage = { input, output, cacheRead: 0, cacheWrite: 0, totalTokens: input + output, cost };
+  // SVG output adds the authoring model's tokens, priced from Pi's OpenAI metadata when Pi knows it.
+  if (isRecord(svg)) {
+    const author = svg.model;
+    const svgInput = tokens(svg.input_tokens);
+    const svgOutput = tokens(svg.output_tokens);
+    if (svgInput !== undefined && svgOutput !== undefined) {
+      const price = getBuiltinModels("openai").find(({ id }) => id === author)?.cost;
+      usage.input += svgInput;
+      usage.output += svgOutput;
+      usage.totalTokens += svgInput + svgOutput;
+      cost.input += (svgInput * (price?.input ?? 0)) / 1e6;
+      cost.output += (svgOutput * (price?.output ?? 0)) / 1e6;
+    }
+  }
+  cost.total = cost.input + cost.output;
   return usage;
 }
 
@@ -761,13 +858,14 @@ async function requestImages(
     output: Partial<ReturnType<typeof mediaOutputOptions>>;
     images?: { image_url: string }[];
     mask?: { image_url: string };
+    markup?: { image_url: string };
   },
   signal: AbortSignal,
   onPartial?: (image: ImageContent, index: number) => void,
   { onPayload, ...transport }: TransportOptions & { onPayload?: (payload: unknown) => unknown } = {},
 ) {
   const route = mediaCapability(model)?.route;
-  const { prompt, images, mask } = request;
+  const { prompt, images, mask, markup } = request;
   const { partial_images = 0, ...output } = request.output;
   const n = output.n ?? 1;
   const stream = route === "openai" && partial_images > 0;
@@ -782,7 +880,7 @@ async function requestImages(
           aspect_ratio: output.aspect_ratio,
         }
       : route === "openai"
-        ? { model, prompt, ...output, n, images, mask, ...(stream ? { stream, partial_images } : {}) }
+        ? { model, prompt, ...output, n, images, mask, markup, ...(stream ? { stream, partial_images } : {}) }
         : {
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: {
@@ -808,8 +906,14 @@ async function requestImages(
       openaiImage: route === "openai",
     });
     return {
-      images: route === "gemini" ? parseGoogleImages(result) : parseImages(result, n),
-      usage: route === "openai" && isRecord(result) ? imageUsage(model, result.usage) : undefined,
+      images:
+        route === "gemini"
+          ? parseGoogleImages(result)
+          : parseImages(result, n, route === "openai" ? output.output_format : undefined),
+      usage:
+        route === "openai" && isRecord(result)
+          ? imageUsage(model, result.usage, result.svg_usage)
+          : undefined,
     };
   }
   // Each frame carries one full image, so the stream may hold the final image plus every preview.
@@ -839,7 +943,10 @@ async function requestImages(
     (event) => isRecord(event) && typeof event.type === "string" && event.type.endsWith(".completed"),
   );
   if (completed.length !== n) throw new Error(`CLIProxyAPI image stream must complete ${n} image(s).`);
-  return { images: completed.map(parseImage), usage: imageUsage(model, completed[0].usage) };
+  return {
+    images: completed.map((event) => parseImage(event)),
+    usage: imageUsage(model, completed[0].usage),
+  };
 }
 
 export async function generateNativeImages(
@@ -967,11 +1074,14 @@ export async function generateImage(
   let previewBudget = MAX_INLINE_IMAGE_BASE64_BYTES;
   const content: (TextContent | ImageContent)[] = [];
   for (const [index, { image }] of images.entries()) {
-    const previewOmitted = !ctx.model?.input.includes("image")
-      ? "Preview omitted: the current chat model does not support images."
-      : image.data.length > previewBudget
-        ? "Preview omitted: image base64 exceeds the 4 MiB inline budget. Use read on the saved file."
-        : undefined;
+    // Chat providers disagree on animated GIF input and reject SVG, so both skip inline previews.
+    const previewOmitted = ["image/gif", "image/svg+xml"].includes(image.mimeType)
+      ? "Preview omitted: GIF and SVG results are saved without an inline preview."
+      : !ctx.model?.input.includes("image")
+        ? "Preview omitted: the current chat model does not support images."
+        : image.data.length > previewBudget
+          ? "Preview omitted: image base64 exceeds the 4 MiB inline budget. Use read on the saved file."
+          : undefined;
     content.push({
       type: "text",
       text: `Saved image: ${files[index].path}${previewOmitted ? `\n${previewOmitted}` : ""}`,
@@ -1076,7 +1186,7 @@ export function registerMediaTools(pi: ExtensionAPI, config: Config) {
     name: "cliproxyapi_generate_image",
     label: "CLIProxyAPI image",
     description:
-      "Generate images, or edit local images with OpenAI models by supplying images and an optional mask. Supports OpenAI size, quality, background, format/compression, image count and streamed partial previews from cliproxyapi_media_models. Uses the selected model or automatic OpenAI/GPT default without changing chat. Saves final images under a new .pi/ directory with optional previews. Maximum response: 32 MiB in total, plus 32 MiB per streamed preview; inline base64: 4 MiB. No automatic retries.",
+      "Generate images, or edit local images with OpenAI models by supplying images and an optional mask or markup layer. Supports OpenAI size, quality, complexity, background, format/compression, GIF/SVG output, image count and streamed partial previews; check cliproxyapi_media_models for each model's controls. Uses the selected model or automatic OpenAI/GPT default without changing chat. Saves final images under a new .pi/ directory with optional previews. Maximum response: 32 MiB in total, plus 32 MiB per streamed preview; inline base64: 4 MiB. No automatic retries.",
     promptSnippet: "Generate requested raster images through CLIProxyAPI using the effective image default.",
     promptGuidelines: [
       "Use cliproxyapi_generate_image for requested raster images. Omit model to use the effective default unless a specific image model is requested; keep the current chat model.",

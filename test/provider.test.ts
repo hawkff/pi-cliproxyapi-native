@@ -2165,6 +2165,9 @@ test("previous-policy caches cannot restore GPT-image chat aliases", async (t) =
     "gpt-image-2.5-flare",
     "gpt-image-2.5-sunburst",
     "gpt-image-2.5",
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6",
   ]) {
     const config = parseConfig({ aliases: { [id]: "openai/gpt-fixture" } });
     const provider = createCliproxyProvider(config, known);
@@ -2233,6 +2236,8 @@ test("refresh registers available image models for Pi and reports unmapped chat 
     "gemini-3-pro-image",
     "grok-imagine-video",
     "imagen-4.0-generate-001",
+    "gpt-image-2.6-flare",
+    "api/gpt-image-2.6",
   ];
   const baseUrl = await server(t, (_req, res) =>
     res.end(
@@ -2250,10 +2255,12 @@ test("refresh registers available image models for Pi and reports unmapped chat 
       ["gpt-image-2.5-sunburst", ["text", "image"]],
       ["api/gpt-image-2", ["text", "image"]],
       ["gemini-3-pro-image", ["text"]],
+      ["gpt-image-2.6-flare", ["text", "image"]],
     ].map(([id, input]) => ({ id, api: IMAGE_API, input, output: ["image"], baseUrl })),
   );
   assert.deepEqual(images[0].cost, { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 });
   assert.deepEqual(images[2].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.deepEqual(images[3].cost, images[0].cost);
 });
 
 test("Pi image calls reuse proxy validation, honor payload hooks, report usage, and return errors as results", async (t) => {

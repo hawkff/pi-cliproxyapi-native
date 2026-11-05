@@ -1005,8 +1005,8 @@ test("media picker and listings show derived defaults without footer output or u
           () => {},
         );
         const rendered = picker.render(200).join("\n");
-        assert.match(rendered, /gpt-image-2.5-sunburst.*automatic default/);
-        assert.match(rendered, /gpt-image-2.5-sunburst.*selected/);
+        assert.match(rendered, /gpt-image-2.6-sunburst.*automatic default/);
+        assert.match(rendered, /gpt-image-2.6-sunburst.*selected/);
         return undefined;
       },
     },
@@ -1021,10 +1021,10 @@ test("media picker and listings show derived defaults without footer output or u
   await command.handler("list", { ...ctx, model: chat });
   assert.match(output.at(-1) ?? "", /Image: none/);
   await command.handler("list", ctx);
-  assert.match(output.at(-1) ?? "", /gpt-image-2.5-sunburst.*automatic default/);
+  assert.match(output.at(-1) ?? "", /gpt-image-2.6-sunburst.*automatic default/);
   for (const mode of ["rpc", "json", "print"] as const) {
     await command.handler("list", { ...ctx, mode, hasUI: mode === "rpc" });
-    assert.match(output.at(-1) ?? "", /gpt-image-2.5-sunburst.*automatic default/);
+    assert.match(output.at(-1) ?? "", /gpt-image-2.6-sunburst.*automatic default/);
   }
   await command.handler("", { ...ctx, mode: "tui" });
   await command.handler(`select ${video}`, ctx);

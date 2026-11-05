@@ -14,6 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { ImageContent } from "@earendil-works/pi-ai";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import {
   type ExtensionAPI,
   type ExtensionToolContext,
@@ -48,6 +49,9 @@ const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwM
 const jpeg =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAAr/2Q==";
 const webp = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
+const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+const svgDocument = (root: string) => `<?xml version="1.0" encoding="UTF-8"?>\n<!-- fixture -->\n${root}\n`;
+const svg = (root: string) => Buffer.from(svgDocument(root)).toString("base64");
 
 async function home(t: TestContext) {
   const path = await mkdtemp(join(tmpdir(), "pi-cliproxyapi-media-test-"));
@@ -856,6 +860,9 @@ test("recognized backends do not enable xAI media and unknown prefixes do not in
 });
 
 const openaiIds = [
+  "gpt-image-2.6-flare",
+  "gpt-image-2.6-sunburst",
+  "gpt-image-2.6",
   "gpt-image-2.5-flare",
   "gpt-image-2.5-sunburst",
   "gpt-image-2.5",
@@ -899,7 +906,7 @@ test("OpenAI image IDs are image-only, preserve all wire IDs, and reject unsuppo
   }
 });
 
-test("all five OpenAI IDs POST one image without response_format and reuse bounded private artifact validation", async (t) => {
+test("all eight OpenAI IDs POST one image without response_format and reuse bounded private artifact validation", async (t) => {
   const cwd = await home(t);
   const ctx = context(cwd);
   let response: unknown;
@@ -1472,6 +1479,24 @@ test("media discovery reports model-specific output controls and preserves quali
     max_pixels: 8294400,
     max_aspect_ratio: 3,
   });
+  for (const id of ["gpt-image-2.6-sunburst", "gpt-image-2.6-flare"]) {
+    assert.deepEqual(controls(id).size_limits, controls("gpt-image-2.5-sunburst").size_limits);
+    assert.deepEqual(controls(id).quality, controls("gpt-image-2.5-sunburst").quality);
+    assert.deepEqual(controls(id).complexity, ["low", "medium", "high"]);
+    assert.deepEqual(controls(id).output_format, ["png", "jpeg", "webp", "gif", "svg"]);
+    assert.deepEqual(controls(id).gif, {
+      frame_count: { min: 2, max: 16 },
+      frame_duration_ms: { min: 20, max: 2000 },
+    });
+    assert.equal(controls(id).editing?.markup, "png");
+  }
+  for (const id of ["gpt-image-2.6", "gpt-image-2.5-sunburst", "gpt-image-2.5", "gpt-image-2"]) {
+    assert.deepEqual(controls(id).complexity, []);
+    assert.deepEqual(controls(id).output_format, ["png", "jpeg", "webp"]);
+    assert.equal(controls(id).gif, undefined);
+    assert.equal(controls(id).editing?.markup, id === "gpt-image-2.5-sunburst" ? "png" : undefined);
+  }
+  assert.deepEqual(controls("gpt-image-2.6").quality, ["auto", "low", "medium", "high"]);
   assert.deepEqual(controls("gemini-2.5-flash-image").resolution, []);
   assert.deepEqual(controls("gemini-3-pro-image").resolution, ["1K", "2K", "4K"]);
   assert.deepEqual(controls("gemini-3.1-flash-image").resolution, ["512", "1K", "2K", "4K"]);
@@ -1749,7 +1774,53 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     assert.equal((await readFile(join(ctx.cwd, name))).toString("base64"), data);
 });
 
+test("markup edits send a transparent PNG layer to Sunburst and Flare without a mask", async (t) => {
+  const ids = ["gpt-image-2.6-flare", "oauth/gpt-image-2.5-sunburst"];
+  const posted: unknown[] = [];
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET") return void res.end(JSON.stringify({ data: ids.map((id) => ({ id })) }));
+      assert.equal(req.url, "/v1/images/edits");
+      void body(req).then((value) => {
+        posted.push(value);
+        res.end(JSON.stringify({ data: [{ b64_json: png }] }));
+      });
+    }),
+  });
+  const ctx = context(await home(t));
+  for (const [name, data] of [
+    ["kitchen.jpg", jpeg],
+    ["kitchen.png", png],
+    ["overlay.png", png],
+  ])
+    await writeFile(join(ctx.cwd, name), Buffer.from(data, "base64"));
+  // OpenAI checks markup on a JPEG first image after orientation; the extension checks PNG sizes.
+  await generateImage(
+    config,
+    { model: ids[0], prompt: "fixture", images: ["kitchen.jpg"], markup: "overlay.png", complexity: "low" },
+    ctx,
+  );
+  await generateImage(
+    config,
+    { model: ids[1], prompt: "fixture", images: ["kitchen.png"], markup: "overlay.png" },
+    ctx,
+  );
+  const layer = { image_url: `data:image/png;base64,${png}` };
+  assert.deepEqual(posted, [
+    {
+      model: ids[0],
+      prompt: "fixture",
+      complexity: "low",
+      n: 1,
+      images: [{ image_url: `data:image/jpeg;base64,${jpeg}` }],
+      markup: layer,
+    },
+    { model: ids[1], prompt: "fixture", n: 1, images: [layer], markup: layer },
+  ]);
+});
+
 test("invalid OpenAI controls and edit inputs fail before authentication or network access", async (t) => {
+  const image26 = "api/gpt-image-2.6-sunburst";
   const config = parseConfig({});
   const ctx = {
     ...context(await home(t)),
@@ -1790,6 +1861,28 @@ test("invalid OpenAI controls and edit inputs fail before authentication or netw
     { partial_images: 1, n: 2 },
     { model: imageModel, partial_images: 1 },
     { model: "gemini-3-pro-image", partial_images: 1 },
+    { complexity: "low" },
+    { output_format: "svg" },
+    { model: image26, complexity: "max" },
+    { model: "oauth/gpt-image-2.6", complexity: "low" },
+    { model: "api/gpt-image-2", output_format: "gif" },
+    { model: image26, output_format: "svg", n: 2 },
+    { model: image26, output_format: "gif", partial_images: 1 },
+    { model: image26, output_format: "svg", partial_images: 2 },
+    { model: image26, output_format: "gif", output_compression: 50 },
+    { model: image26, frame_count: 4 },
+    { model: image26, output_format: "png", frame_duration_ms: 100 },
+    { model: image26, output_format: "gif", frame_count: 1 },
+    { model: image26, output_format: "gif", frame_count: 17 },
+    { model: image26, output_format: "gif", frame_count: 2.5 },
+    { model: image26, output_format: "gif", frame_duration_ms: 10 },
+    { model: image26, output_format: "gif", frame_duration_ms: 2001 },
+    { model: image26, output_format: "gif", size: "520x512" },
+    { model: image26, output_format: "gif", images: ["source.png"] },
+    { model: image26, output_format: "svg", images: ["source.png"] },
+    { markup: "mask.png" },
+    { model: "api/gpt-image-2", images: ["source.png"], markup: "mask.png" },
+    { images: ["source.png"], mask: "mask.png", markup: "mask.png" },
   ])
     await assert.rejects(
       generateImage(config, { model: "api/gpt-image-2.5-sunburst", prompt: "fixture", ...params }, ctx),
@@ -1809,6 +1902,10 @@ test("invalid OpenAI controls and edit inputs fail before authentication or netw
         { model: "api/gpt-image-2", prompt: "fixture", images: ["source.png"], mask },
         ctx,
       ),
+    );
+  for (const markup of ["invalid.png", "wrong-size.png", "no-alpha.png"])
+    await assert.rejects(
+      generateImage(config, { model: image26, prompt: "fixture", images: ["source.png"], markup }, ctx),
     );
   await assert.rejects(
     generateImage(config, { model: "api/gpt-image-2", prompt: "fixture", images: ["invalid.png"] }, ctx),
@@ -2066,6 +2163,114 @@ test("OpenAI image usage reaches the tool result with list-price estimates", asy
       undefined,
     );
   }
+});
+
+test("GPT Image 2.6 GIF and SVG output saves validated files without previews and counts SVG authoring", async (t) => {
+  const model = "api/gpt-image-2.6-sunburst";
+  const author = getBuiltinModels("openai").find(({ cost }) => cost.input > 0 && cost.output > 0);
+  assert.ok(author);
+  const root =
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><rect width="16" height="16" fill="url(#g)"/><use xlink:href="#r"/></svg>';
+  const usage = {
+    input_tokens: 60,
+    input_tokens_details: { text_tokens: 10, image_tokens: 50 },
+    output_tokens: 1000,
+    total_tokens: 1060,
+  };
+  let response: unknown;
+  const posted: unknown[] = [];
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "GET") return void res.end(JSON.stringify({ data: [{ id: model }] }));
+      assert.equal(req.url, "/v1/images/generations");
+      void body(req).then((value) => {
+        posted.push(value);
+        res.end(JSON.stringify(response));
+      });
+    }),
+  });
+  const ctx = context(await home(t));
+  response = { data: [{ b64_json: gif }, { b64_json: gif }] };
+  // GIF frames may go below the still-image minimum pixel count.
+  const params = {
+    model,
+    prompt: "fixture",
+    output_format: "gif",
+    frame_count: 4,
+    frame_duration_ms: 120,
+    size: "256x256",
+    complexity: "low",
+    n: 2,
+  };
+  const animated = await generateImage(config, params, ctx);
+  assert.deepEqual(posted, [params]);
+  assert.deepEqual(
+    animated.details.files.map(({ mimeType }) => mimeType),
+    ["image/gif", "image/gif"],
+  );
+  assert.ok(animated.details.files[1].path.endsWith("image-2.gif"));
+  assert.equal((await readFile(animated.details.files[1].path)).toString("base64"), gif);
+  assert.ok(animated.content.every((part) => part.type === "text"));
+  assert.match(JSON.stringify(animated.content), /GIF and SVG results are saved without an inline preview/);
+  for (const [svgModel, authorCost] of [
+    [author.id, (100 * author.cost.input + 2000 * author.cost.output) / 1e6],
+    ["unknown-author", 0],
+  ] as const) {
+    response = {
+      data: [{ b64_json: svg(root) }],
+      usage,
+      svg_usage: {
+        model: svgModel,
+        input_tokens: 100,
+        output_tokens: 2000,
+        reasoning_tokens: 1500,
+        total_tokens: 2100,
+      },
+    };
+    const vector = await generateImage(
+      config,
+      { model, prompt: "fixture", output_format: "svg", quality: "low" },
+      ctx,
+    );
+    assert.deepEqual(posted.at(-1), { model, prompt: "fixture", output_format: "svg", quality: "low", n: 1 });
+    assert.equal(vector.details.files[0].mimeType, "image/svg+xml");
+    assert.ok(vector.details.files[0].path.endsWith("image.svg"));
+    assert.equal(await readFile(vector.details.files[0].path, "utf8"), svgDocument(root));
+    assert.equal(vector.content.length, 1);
+    assert.equal(vector.usage?.totalTokens, 1060 + 2100);
+    assert.equal(vector.usage?.output, 3000);
+    assert.ok(
+      Math.abs((vector.usage?.cost.total ?? 0) - ((10 * 5 + 50 * 8 + 1000 * 30) / 1e6 + authorCost)) < 1e-12,
+    );
+  }
+  const before = await readdir(join(ctx.cwd, ".pi"));
+  for (const [output_format, data] of [
+    ["gif", png],
+    ["gif", Buffer.from("GIF89a").toString("base64")],
+    ["svg", png],
+    ["svg", Buffer.from("<svg>\u00ff</svg>", "latin1").toString("base64")],
+    ["svg", svg('<svg xmlns="http://www.w3.org/2000/svg">')],
+    ["svg", svg('<html><svg xmlns="http://www.w3.org/2000/svg"></svg></html>')],
+    ["svg", Buffer.from('<!DOCTYPE svg [<!ENTITY x "y">]><svg>&x;</svg>').toString("base64")],
+    ...[
+      "<script>alert(1)</script>",
+      '<rect onclick="alert(1)"/>',
+      '<image href="https://media.example/x.png"/>',
+      '<a href="javascript:alert(1)"><rect/></a>',
+      '<use href="https://media.example/a.svg#x"/>',
+      "<rect fill=\"url('https://media.example/x')\"/>",
+      '<style>@import "https://media.example/x.css";</style>',
+      '<set attributeName="fill" to="red"/>',
+      "<foreignObject><div/></foreignObject>",
+    ].map((element) => ["svg", svg(`<svg xmlns="http://www.w3.org/2000/svg">${element}</svg>`)]),
+  ]) {
+    response = { data: [{ b64_json: data }] };
+    await assert.rejects(
+      generateImage(config, { model, prompt: "fixture", output_format }, ctx),
+      /CLIProxyAPI returned/,
+    );
+  }
+  assert.deepEqual(await readdir(join(ctx.cwd, ".pi")), before);
 });
 
 test("partial previews stream over the image transport and only the final image is saved", async (t) => {
