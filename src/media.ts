@@ -706,18 +706,19 @@ function imageType(bytes: Buffer) {
 }
 
 // OpenAI documents static SVG without scripts, external resources, or raster images. Only static drawing
-// elements and same-document references pass; anything the checks cannot read fails closed.
+// elements with presentation attributes and same-document references pass; anything else fails closed.
 const svgElements = new Set(
-  `svg g defs title desc symbol use style path rect circle ellipse line polyline polygon text tspan textPath
+  `svg g defs title desc symbol use path rect circle ellipse line polyline polygon text tspan textPath
   linearGradient radialGradient stop pattern clipPath mask marker filter feBlend feColorMatrix feComponentTransfer
   feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap feDistantLight feDropShadow feFlood feFuncA
   feFuncB feFuncG feFuncR feGaussianBlur feMerge feMergeNode feMorphology feOffset fePointLight
   feSpecularLighting feSpotLight feTile feTurbulence`.split(/\s+/),
 );
-// Matches declarations, CDATA, processing instructions, event handlers, CSS escapes and imports, foreign
-// namespaces, and references outside the document.
+// Checked after decoding character references: event handlers and style attributes after any separator HTML
+// accepts, CSS escapes and image functions, xml:base, foreign namespaces, and references outside the
+// document. CSS whitespace is ASCII only, so url(&#160;#id) is not a fragment.
 const unsafeSvg =
-  /<[!?]|\son[a-z]+\s*=|\\|@import|image-set\(|xmlns(?::[\w.-]+)?\s*=\s*["'](?!http:\/\/www\.w3\.org\/(?:2000\/svg|1999\/xlink)["'])|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\(\s*(?:"(?!#)|'(?!#)|[^"'\s#)])/i;
+  /[^\w.:-](?:on[a-z]+|style)\s*=|\\|(?:image-set|image|src)\(|xml:base|xmlns(?::[\w.-]+)?\s*=\s*["'](?!http:\/\/www\.w3\.org\/(?:2000\/svg|1999\/xlink)["'])|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\([ \t\n\r\f]*(?:"(?!#)|'(?!#)|[^"'#) \t\n\r\f])/i;
 
 // Accept GIF or SVG only when the request asked GPT Image 2.6 for that format.
 function outputType(bytes: Buffer, format?: string) {
@@ -733,20 +734,24 @@ function outputType(bytes: Buffer, format?: string) {
   } catch {
     throw new Error("CLIProxyAPI returned an SVG that is not valid UTF-8.");
   }
-  // Comments cannot run, and decoding character references keeps them from hiding text from the checks.
-  const body = text
-    .replace(/^\s*<\?xml[^>]*\?>/, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/&#(x[\da-f]+|\d+);?/gi, (_, code: string) => {
-      const point = /^x/i.test(code) ? Number.parseInt(code.slice(1), 16) : Number(code);
-      return point <= 0x10ffff ? String.fromCodePoint(point) : "\\";
-    })
+  // Only the XML declaration and strict XML comments are removed, so HTML's shorter comment forms cannot
+  // hide markup. Tags are checked before decoding because a decoded "<" in text is not markup.
+  const markup = text
+    .replace(/^\s*<\?xml\s[^>]*\?>/, "")
+    .replace(/<!--(?!-?>)(?:[^-]|-(?!-))*-->/g, "")
     .trim();
+  const decoded = markup.replace(/&#(x[\da-f]+|\d+);?/gi, (_, code: string) => {
+    const point = /^x/i.test(code) ? Number.parseInt(code.slice(1), 16) : Number(code);
+    return point <= 0x10ffff ? String.fromCodePoint(point) : "\\";
+  });
   if (
-    !/^<svg[\s>]/.test(body) ||
-    !body.endsWith("</svg>") ||
-    unsafeSvg.test(body) ||
-    [...body.matchAll(/<\/?([^\s/>]*)/g)].some(([, name]) => !svgElements.has(name))
+    !/^<svg[\s>]/.test(markup) ||
+    !markup.endsWith("</svg>") ||
+    /<[!?]/.test(markup) ||
+    // XML defines only these named references; HTML would decode others such as &lpar; into markup.
+    /&(?!(?:amp|lt|gt|quot|apos);|#)/.test(markup) ||
+    [...markup.matchAll(/<\/?([^\s/>]*)/g)].some(([, name]) => !svgElements.has(name)) ||
+    unsafeSvg.test(decoded)
   )
     throw new Error("CLIProxyAPI returned a malformed SVG or one with active or external content.");
   return { extension: "svg", mimeType: "image/svg+xml" };

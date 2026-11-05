@@ -2172,7 +2172,7 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
   const author = getBuiltinModels("openai").find(({ cost }) => cost.input > 0 && cost.output > 0);
   assert.ok(author);
   const root =
-    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><title>Field &amp; Flour</title><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><g fill="url(#g)"><path d="M0 0h16v16H0z"/></g><text x="8" y="12" font-family="Arial">BAKERY &#169;</text><use xlink:href="#r"/></svg>';
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><title>Field &amp; Flour</title><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><g fill="url(#g)"><path d="M0 0h16v16H0z" stroke="url( #g )"/></g><text x="8" y="12" font-family="Arial">1 &#60; 2 &#169;</text><use xlink:href="#r"/></svg>';
   const corrupt = (data: string, offset: number) => {
     const bytes = Buffer.from(data, "base64");
     bytes[offset] |= 0x80;
@@ -2262,6 +2262,18 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
     ["svg", svg('<svg xmlns="http://www.w3.org/2000/svg">')],
     ["svg", svg('<html><svg xmlns="http://www.w3.org/2000/svg"></svg></html>')],
     ["svg", Buffer.from('<!DOCTYPE svg [<!ENTITY x "y">]><svg>&x;</svg>').toString("base64")],
+    [
+      "svg",
+      Buffer.from(
+        '<?xml-stylesheet type="text/css" href="https://media.example/a.css"?>\n<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+      ).toString("base64"),
+    ],
+    [
+      "svg",
+      svg(
+        '<svg xmlns="http://www.w3.org/2000/svg" xml:base="https://media.example/a.svg"><use href="#r"/></svg>',
+      ),
+    ],
     ...[
       "<script>alert(1)</script>",
       '<rect onclick="alert(1)"/>',
@@ -2275,9 +2287,18 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
       '<s:script xmlns:s="http://www.w3.org/2000/svg">alert(1)</s:script>',
       '<g xmlns="http://www.w3.org/1999/xhtml"><iframe src="https://media.example/"/></g>',
       '<style>@\\69mport "https://media.example/x.css";</style>',
-      '<rect style="fill:u&#114;l(https://media.example/x)"/>',
-      "<rect style=\"fill:image-set('https://media.example/x.png' 1x)\"/>",
+      "<style>@keyframes blink{to{opacity:0}}rect{animation:blink 1s infinite}</style>",
       "<style><![CDATA[rect{fill:red}]]></style>",
+      '<rect style="fill:red"/>',
+      '<rect fill="u&#114;l(https://media.example/x)"/>',
+      '<rect fill="u\\72l(https://media.example/x)"/>',
+      '<rect fill="url(&#160;#g)"/>',
+      '<rect fill="url&lpar;https://media.example/x&rpar;"/>',
+      '<rect fill="u&bsol;72l(https://media.example/x)"/>',
+      "<rect mask=\"image-set('https://media.example/x.png' 1x)\"/>",
+      '<rect/onclick="alert(1)"/>',
+      "<!-- --!><script>alert(1)</script> -->",
+      "<!--><script>alert(1)</script>-->",
       '<a href="#r"><rect/></a>',
     ].map((element) => ["svg", svg(`<svg xmlns="http://www.w3.org/2000/svg">${element}</svg>`)]),
   ]) {
