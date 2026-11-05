@@ -88,17 +88,20 @@ test("automatic media selection remains separate from the chat credential route"
   }
 });
 
-test("the picker explains why API-key gpt-image-2.5 is disabled while other routes stay usable", () => {
-  const ids = ["api/gpt-image-2.5", "gpt-image-2.5", "oauth/gpt-image-2.5"];
-  const catalog = { data: ids.map((id) => ({ id })) };
-  assert.deepEqual(
-    mapMediaCatalog(catalog).map(({ id }) => id),
-    ids.slice(1),
-  );
-  const row = pickerCatalog(catalog)[0];
-  assert.equal(row.supported, false);
-  assert.match(row.disabledReason ?? "", /no gpt-image-2.5 model.*sunburst/);
-  assert.deepEqual(mediaControls(ids[0]).quality, []);
-  assert.throws(() => resolveMediaModel(parseConfig({}), {}, "image", ids[0]), /no gpt-image-2.5 model/);
-  assert.equal(resolveMediaModel(parseConfig({}), {}, "image", ids[2]), ids[2]);
+test("the picker explains why API-key plain GPT Image 2.5 and 2.6 are disabled while other routes stay usable", () => {
+  for (const plain of ["gpt-image-2.5", "gpt-image-2.6"]) {
+    const ids = [`api/${plain}`, plain, `oauth/${plain}`];
+    const catalog = { data: ids.map((id) => ({ id })) };
+    assert.deepEqual(
+      mapMediaCatalog(catalog).map(({ id }) => id),
+      ids.slice(1),
+    );
+    const row = pickerCatalog(catalog)[0];
+    const reason = `OpenAI's API has no ${plain} model. Use api/${plain}-sunburst or api/${plain}-flare.`;
+    assert.equal(row.supported, false);
+    assert.equal(row.disabledReason, reason);
+    assert.deepEqual(mediaControls(ids[0]).quality, []);
+    assert.throws(() => resolveMediaModel(parseConfig({}), {}, "image", ids[0]), { message: reason });
+    assert.equal(resolveMediaModel(parseConfig({}), {}, "image", ids[2]), ids[2]);
+  }
 });

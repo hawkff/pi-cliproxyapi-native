@@ -2165,6 +2165,9 @@ test("previous-policy caches cannot restore GPT-image chat aliases", async (t) =
     "gpt-image-2.5-flare",
     "gpt-image-2.5-sunburst",
     "gpt-image-2.5",
+    "gpt-image-2.6-flare",
+    "gpt-image-2.6-sunburst",
+    "gpt-image-2.6",
   ]) {
     const config = parseConfig({ aliases: { [id]: "openai/gpt-fixture" } });
     const provider = createCliproxyProvider(config, known);
@@ -2233,6 +2236,8 @@ test("refresh registers available image models for Pi and reports unmapped chat 
     "gemini-3-pro-image",
     "grok-imagine-video",
     "imagen-4.0-generate-001",
+    "gpt-image-2.6-flare",
+    "api/gpt-image-2.6",
   ];
   const baseUrl = await server(t, (_req, res) =>
     res.end(
@@ -2250,15 +2255,18 @@ test("refresh registers available image models for Pi and reports unmapped chat 
       ["gpt-image-2.5-sunburst", ["text", "image"]],
       ["api/gpt-image-2", ["text", "image"]],
       ["gemini-3-pro-image", ["text"]],
+      ["gpt-image-2.6-flare", ["text", "image"]],
     ].map(([id, input]) => ({ id, api: IMAGE_API, input, output: ["image"], baseUrl })),
   );
   assert.deepEqual(images[0].cost, { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 });
   assert.deepEqual(images[2].cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.deepEqual(images[3].cost, images[0].cost);
 });
 
 test("Pi image calls reuse proxy validation, honor payload hooks, report usage, and return errors as results", async (t) => {
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
   const id = "api/gpt-image-2.5-sunburst";
+  const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
   const bodies: { path: string | undefined; body: unknown }[] = [];
   const tenants: unknown[] = [];
   let status = 200;
@@ -2266,21 +2274,26 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
     assert.equal(req.headers.authorization, `Bearer ${key}`);
     tenants.push(req.headers["x-tenant"]);
     if (req.method === "GET")
-      return void res.end(JSON.stringify({ data: [{ id }, { id: "gemini-3-pro-image" }] }));
+      return void res.end(
+        JSON.stringify({
+          data: [{ id }, { id: "gemini-3-pro-image" }, { id: "api/gpt-image-2.6-flare" }],
+        }),
+      );
     let text = "";
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       text += chunk;
     });
     req.on("end", () => {
-      bodies.push({ path: req.url, body: JSON.parse(text) });
+      const body: unknown = JSON.parse(text);
+      bodies.push({ path: req.url, body });
       if (status !== 200)
         return void res
           .writeHead(status, { "content-type": "application/json" })
           .end(JSON.stringify({ error: { message: `Rejected for ${key}` } }));
       res.end(
         JSON.stringify({
-          data: [{ b64_json: png }],
+          data: [{ b64_json: isRecord(body) && body.output_format === "gif" ? gif : png }],
           usage: {
             input_tokens: 60,
             input_tokens_details: { text_tokens: 10, image_tokens: 50 },
@@ -2340,6 +2353,16 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
   assert.deepEqual(statuses, [200]);
   assert.equal(tenants.at(-1), "fixture");
   assert.equal(tenants[0], undefined);
+  const flare = models.getModelOfType("image", PROVIDER_ID, "api/gpt-image-2.6-flare");
+  assert.ok(flare);
+  // The decoder follows the payload a hook sends, so a hook-selected GIF is not parsed as a raster image.
+  const animated = await models.generateImages(
+    flare,
+    { input: [{ type: "text", text: "fixture" }] },
+    { onPayload: (payload) => (isRecord(payload) ? { ...payload, output_format: "gif" } : payload) },
+  );
+  assert.equal(animated.stopReason, "stop", animated.errorMessage);
+  assert.deepEqual(animated.output, [{ type: "image", data: gif, mimeType: "image/gif" }]);
   status = 400;
   const failed = await models.generateImages(image, { input: [{ type: "text", text: "fixture" }] });
   assert.equal(failed.stopReason, "error");
@@ -2362,7 +2385,7 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
     { signal: AbortSignal.abort() },
   );
   assert.equal(aborted.stopReason, "aborted");
-  assert.equal(bodies.length, 3);
+  assert.equal(bodies.length, 4);
 });
 
 const responsesFlags = [

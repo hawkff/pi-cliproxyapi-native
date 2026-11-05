@@ -3,7 +3,7 @@ import { type MediaPurpose, mediaCapability, mediaPurpose, modelRoute } from "./
 import { type Config, isModelId, isRecord, PROVIDER_ID } from "./config.ts";
 
 export const MEDIA_DEFAULTS_ENTRY = "cliproxyapi-media-defaults";
-export const OPENAI_IMAGE_DEFAULT = "gpt-image-2.5-sunburst";
+export const OPENAI_IMAGE_DEFAULT = "gpt-image-2.6-sunburst";
 // null blocks fallback for invalid selections, including after unrelated picker saves.
 export type MediaDefaults = Partial<Record<MediaPurpose, string | null>>;
 export type DefaultsContext = {

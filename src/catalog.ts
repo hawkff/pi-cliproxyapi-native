@@ -119,6 +119,15 @@ const mediaModels = new Map<
   }
 >([
   [
+    "gpt-image-2.6-flare",
+    { name: "GPT Image 2.6 Flare", purpose: "image", route: "openai", price: gptImage2Price },
+  ],
+  [
+    "gpt-image-2.6-sunburst",
+    { name: "GPT Image 2.6 Sunburst", purpose: "image", route: "openai", price: gptImage2Price },
+  ],
+  ["gpt-image-2.6", { name: "GPT Image 2.6", purpose: "image", route: "openai" }],
+  [
     "gpt-image-2.5-flare",
     { name: "GPT Image 2.5 Flare", purpose: "image", route: "openai", price: gptImage2Price },
   ],
@@ -165,13 +174,12 @@ export function mediaCapability(id: string) {
   if (backend && (capability?.route === "xai" || capability?.route === "openai")) {
     return { ...capability, route: undefined, disabledReason: `Unsupported media execution on ${backend}.` };
   }
-  // CLIProxyAPI 8.0.48 advertises it for API keys, but OpenAI's Images API rejects the bare 2.5 name.
-  if (capability && authType === "api-key" && metadataId === "gpt-image-2.5") {
+  // CLIProxyAPI advertises the plain names for API keys, but OpenAI's Images API has only Sunburst and Flare.
+  if (capability && authType === "api-key" && /^gpt-image-2\.[56]$/.test(metadataId)) {
     return {
       ...capability,
       route: undefined,
-      disabledReason:
-        "OpenAI's API has no gpt-image-2.5 model. Use api/gpt-image-2.5-sunburst or api/gpt-image-2.5-flare.",
+      disabledReason: `OpenAI's API has no ${metadataId} model. Use api/${metadataId}-sunburst or api/${metadataId}-flare.`,
     };
   }
   return capability;
@@ -185,6 +193,9 @@ export function mediaControls(id: string) {
   const capability = mediaCapability(id);
   const { metadataId, authType } = modelRoute(id);
   const openai = capability?.route === "openai";
+  // Sunburst and Flare add quality tiers and markup edits; 2.6 adds complexity plus GIF and SVG output.
+  const tiered = openai && /^gpt-image-2\.[56]-(sunburst|flare)$/.test(metadataId);
+  const image26 = tiered && metadataId.startsWith("gpt-image-2.6-");
   const commonRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"];
   let resolution: string[] = [];
   let aspect_ratio: string[] = [];
@@ -214,24 +225,27 @@ export function mediaControls(id: string) {
         : undefined,
     resolution,
     aspect_ratio,
-    quality: openai
-      ? [
-          "auto",
-          "low",
-          "medium",
-          "high",
-          ...(/^gpt-image-2\.5-(sunburst|flare)$/.test(metadataId) ? ["xhigh", "max"] : []),
-        ]
-      : [],
+    quality: openai ? ["auto", "low", "medium", "high", ...(tiered ? ["xhigh", "max"] : [])] : [],
+    complexity: image26 ? ["low", "medium", "high"] : [],
     background: openai ? ["auto", "opaque", "transparent"] : [],
-    output_format: openai ? ["png", "jpeg", "webp"] : [],
+    output_format: openai ? ["png", "jpeg", "webp", ...(image26 ? ["gif", "svg"] : [])] : [],
+    // GIF sizes are per frame and skip min_pixels; OpenAI checks the animation against its pixel budget.
+    gif: image26
+      ? { frame_count: { min: 2, max: 16 }, frame_duration_ms: { min: 20, max: 2000 } }
+      : undefined,
     output_compression: openai ? { min: 0, max: 100, formats: ["jpeg", "webp"] } : undefined,
     moderation: openai ? ["auto", "low"] : [],
     // Subscription image-tool translation does not forward n.
     n: openai ? { min: 1, max: authType === "api-key" ? 10 : 1 } : undefined,
     partial_images: openai ? { min: 0, max: 3 } : undefined,
     editing: openai
-      ? { max_images: 16, max_file_bytes: 14 * 1024 * 1024, max_total_bytes: 20 * 1024 * 1024, mask: "png" }
+      ? {
+          max_images: 16,
+          max_file_bytes: 14 * 1024 * 1024,
+          max_total_bytes: 20 * 1024 * 1024,
+          mask: "png",
+          ...(tiered ? { markup: "png" } : {}),
+        }
       : undefined,
     input_fidelity: openai && metadataId === "gpt-image-1.5" ? ["low", "high"] : [],
   };
