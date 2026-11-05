@@ -666,7 +666,9 @@ async function generationKey(
   const key = await mediaKey(ctx, signal);
   const available = mapMediaCatalog(await fetchCatalog(config, key, signal));
   if (!available.some(({ id }) => id === params.model)) {
-    throw new Error("The selected media model is not available in the live CLIProxyAPI catalog.");
+    throw new Error(
+      "The selected media model is not available in the live CLIProxyAPI catalog. Update CLIProxyAPI, or choose an advertised model with /cli:model or an explicit model.",
+    );
   }
   return key;
 }
