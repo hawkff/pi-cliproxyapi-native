@@ -50,7 +50,7 @@ const jpeg =
   "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCdAAr/2Q==";
 const webp = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
 const gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-const svgDocument = (root: string) => `<?xml version="1.0" encoding="UTF-8"?>\n<!-- fixture -->\n${root}\n`;
+const svgDocument = (root: string) => `<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n${root}\n`;
 const svg = (root: string) => Buffer.from(svgDocument(root)).toString("base64");
 
 async function home(t: TestContext) {
@@ -2172,7 +2172,7 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
   const author = getBuiltinModels("openai").find(({ cost }) => cost.input > 0 && cost.output > 0);
   assert.ok(author);
   const root =
-    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><title>Field &amp; Flour</title><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8"/></defs><g fill="url(#g)"><path d="M0 0h16v16H0z" stroke="url( #g )"/></g><text x="8" y="12" font-family="Arial">1 &#60; 2 &#169;</text><use xlink:href="#r"/></svg>';
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 16 16"><title>Field &amp; Flour</title><defs><linearGradient id="g"><stop offset="0" stop-color="#fa0"/></linearGradient><rect id="r" width="8" height="8" fill="url(&quot;#g&quot;)"/></defs><g fill="url(#g)"><path d="M0 0h16v16H0z" stroke="url( #g )"/></g><text x="8" y="12" font-family="Arial">1 &#60; 2 &#169;</text><use xlink:href="#r"/></svg>';
   const corrupt = (data: string, offset: number) => {
     const bytes = Buffer.from(data, "base64");
     bytes[offset] |= 0x80;
@@ -2274,6 +2274,24 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
         '<svg xmlns="http://www.w3.org/2000/svg" xml:base="https://media.example/a.svg"><use href="#r"/></svg>',
       ),
     ],
+    // An ISO-2022-JP renderer drops ESC ( B, turning the interrupted name into onload.
+    [
+      "svg",
+      Buffer.from(
+        '<?xml version="1.0" encoding="ISO-2022-JP"?><svg xmlns="http://www.w3.org/2000/svg" onlo\u001b(Bad="alert(1)"></svg>',
+      ).toString("base64"),
+    ],
+    [
+      "svg",
+      Buffer.from(
+        '<?xml version="1.0" encoding="ISO-8859-1"?><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+      ).toString("base64"),
+    ],
+    ["svg", svg('<svg xmlns="http://www.w3.org/2000/svg"><text>\u001b(B</text></svg>')],
+    [
+      "svg",
+      svg('<svg xmlns="http://www.w3.org/2000/svg" data-a="<!--" onload="alert(1)" data-b="-->"></svg>'),
+    ],
     ...[
       "<script>alert(1)</script>",
       '<rect onclick="alert(1)"/>',
@@ -2299,6 +2317,9 @@ test("GPT Image 2.6 GIF and SVG output saves validated files without previews an
       '<rect/onclick="alert(1)"/>',
       "<!-- --!><script>alert(1)</script> -->",
       "<!--><script>alert(1)</script>-->",
+      "<!-- note --><rect/>",
+      // HTML parses this title inside desc as RCDATA, so the comment would end at </title>.
+      '<desc><title><!--</title><svg onload="alert(1)"></svg>--></title></desc>',
       '<a href="#r"><rect/></a>',
     ].map((element) => ["svg", svg(`<svg xmlns="http://www.w3.org/2000/svg">${element}</svg>`)]),
   ]) {

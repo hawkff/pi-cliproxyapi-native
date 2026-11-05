@@ -714,9 +714,10 @@ const svgElements = new Set(
   feFuncB feFuncG feFuncR feGaussianBlur feMerge feMergeNode feMorphology feOffset fePointLight
   feSpecularLighting feSpotLight feTile feTurbulence`.split(/\s+/),
 );
-// Checked after decoding character references: event handlers and style attributes after any separator HTML
-// accepts, CSS escapes and image functions, xml:base, foreign namespaces, and references outside the
-// document. CSS whitespace is ASCII only, so url(&#160;#id) is not a fragment.
+const xmlEntities: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
+// Checked after decoding references: event handlers and style attributes after any separator HTML accepts,
+// CSS escapes and image functions, xml:base, foreign namespaces, and references outside the document. The scan
+// covers text too, so a label that looks like an assignment fails closed. CSS whitespace is ASCII only.
 const unsafeSvg =
   /[^\w.:-](?:on[a-z]+|style)\s*=|\\|(?:image-set|image|src)\(|xml:base|xmlns(?::[\w.-]+)?\s*=\s*["'](?!http:\/\/www\.w3\.org\/(?:2000\/svg|1999\/xlink)["'])|(?:href|src)\s*=\s*(?:"(?!#)|'(?!#)|[^"'\s#>])|url\([ \t\n\r\f]*(?:"(?!#)|'(?!#)|[^"'#) \t\n\r\f])/i;
 
@@ -734,19 +735,30 @@ function outputType(bytes: Buffer, format?: string) {
   } catch {
     throw new Error("CLIProxyAPI returned an SVG that is not valid UTF-8.");
   }
-  // Only the XML declaration and strict XML comments are removed, so HTML's shorter comment forms cannot
-  // hide markup. Tags are checked before decoding because a decoded "<" in text is not markup.
+  // Only a UTF-8 XML declaration is removed: another encoding, such as ISO-2022-JP, makes renderers read
+  // different markup. Tags are checked before decoding because a decoded "<" in text is not markup.
   const markup = text
-    .replace(/^\s*<\?xml\s[^>]*\?>/, "")
-    .replace(/<!--(?!-?>)(?:[^-]|-(?!-))*-->/g, "")
+    .replace(
+      /^\s*<\?xml\s+version\s*=\s*(["'])1\.\d+\1(?:\s+encoding\s*=\s*(["'])utf-8\2)?(?:\s+standalone\s*=\s*(["'])(?:yes|no)\3)?\s*\?>/i,
+      "",
+    )
     .trim();
-  const decoded = markup.replace(/&#(x[\da-f]+|\d+);?/gi, (_, code: string) => {
-    const point = /^x/i.test(code) ? Number.parseInt(code.slice(1), 16) : Number(code);
-    return point <= 0x10ffff ? String.fromCodePoint(point) : "\\";
-  });
+  // One decoding pass, so an escaped ampersand cannot start a second reference.
+  const decoded = markup.replace(
+    /&(?:#(x[\da-f]+|\d+)|(amp|lt|gt|quot|apos));?/gi,
+    (_, code?: string, name?: string) => {
+      if (code === undefined) return xmlEntities[name?.toLowerCase() ?? ""] ?? "\\";
+      const point = /^x/i.test(code) ? Number.parseInt(code.slice(1), 16) : Number(code);
+      return point <= 0x10ffff ? String.fromCodePoint(point) : "\\";
+    },
+  );
   if (
     !/^<svg[\s>]/.test(markup) ||
     !markup.endsWith("</svg>") ||
+    // XML forbids these controls, and ESC can switch an encoding in the middle of an attribute name.
+    /(?![\t\n\r])\p{Cc}/u.test(text) ||
+    // Comments, CDATA, declarations, and processing instructions. HTML parses comments inside SVG
+    // integration points such as desc and title differently from XML, so none are accepted.
     /<[!?]/.test(markup) ||
     // XML defines only these named references; HTML would decode others such as &lpar; into markup.
     /&(?!(?:amp|lt|gt|quot|apos);|#)/.test(markup) ||
