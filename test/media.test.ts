@@ -2360,14 +2360,18 @@ test("partial previews stream over the image transport and only the final image 
         // Split the CRLF separator between two writes so the reader sees CR and LF in separate chunks.
         const invalid = { type: "image_generation.partial_image", b64_json: "!!!!", partial_image_index: 1 };
         res.write(`event: ${invalid.type}\r\ndata: ${JSON.stringify(invalid)}\r\n\r`);
-        void sleep(25).then(() => {
+        void sleep(25).then(async () => {
           res.write("\n");
           if (mode === "error") send({ type: "error", error: { message: `Moderation blocked ${key}` } });
           else if (mode === "success") {
             const usage = { input_tokens: 10, output_tokens: 300, total_tokens: 310 };
             const frame = `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: png, usage })}\n\n`;
-            res.write(frame.slice(0, 20));
-            res.write(frame.slice(20));
+            // Node 24 and newer deliver writes from one turn as one chunk, so a pause keeps the parts apart.
+            // The first two have no line break, like the image data in a large frame.
+            for (const part of [frame.slice(0, 20), frame.slice(20, 60), frame.slice(60)]) {
+              await sleep(25);
+              res.write(part);
+            }
           }
           res.end();
         });
