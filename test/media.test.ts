@@ -257,6 +257,8 @@ test("image responses reject malformed base64, unsupported bytes and URL-only re
     { data: [{ b64_json: "" }] },
     { data: [{ b64_json: "!!!!" }] },
     { data: [{ b64_json: "aGVsbG8=" }] },
+    // A JPEG start without an end marker.
+    { data: [{ b64_json: "/9j/AAA=" }] },
     { data: [{ b64_json: png }, { b64_json: png }] },
   ]) {
     result = value;
@@ -1567,7 +1569,12 @@ test("image and video output controls reach only the selected backend's wire fie
     }
   }
   for (const model of ids.slice(0, 3)) {
-    await generateImage(config, { model, prompt: "fixture", resolution: "2k", aspect_ratio: "20:9" }, ctx);
+    // One image and no previews are the defaults, so every route accepts them.
+    await generateImage(
+      config,
+      { model, prompt: "fixture", resolution: "2k", aspect_ratio: "20:9", n: 1, partial_images: 0 },
+      ctx,
+    );
     assert.deepEqual(requests.at(-1), {
       path: "/gateway/v1/images/generations",
       body: {
@@ -1739,9 +1746,11 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     })}/gateway`,
   });
   const ctx = context(await home(t));
+  // Phone cameras append data after the JPEG end marker.
+  const photo = Buffer.concat([Buffer.from(jpeg, "base64"), Buffer.from("SEFT")]).toString("base64");
   const files = [
     ["source.png", png],
-    ["reference.jpg", jpeg],
+    ["reference.jpg", photo],
     ["mask.png", png],
   ];
   for (const [name, data] of files) await writeFile(join(ctx.cwd, name), Buffer.from(data, "base64"));
@@ -1766,7 +1775,7 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     n: 1,
     quality: "high",
     input_fidelity: "high",
-    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${jpeg}` }],
+    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${photo}` }],
     mask: { image_url: `data:image/png;base64,${png}` },
   });
   assert.deepEqual(progress, ["Editing image...", "Saving image..."]);

@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { modelRoute } from "./catalog.ts";
-import { type Config, isRecord } from "./config.ts";
+import { type Config, deadline, isRecord, readJson } from "./config.ts";
 
 export type QuotaWaitHandler = (id: symbol, remainingSeconds: number | undefined) => void;
 
@@ -36,21 +36,9 @@ async function managementRequest(
   const reader = response.body?.getReader();
   if (!reader) throw new Error("The management API returned an empty response.");
   try {
-    const decoder = new TextDecoder();
-    let text = "";
-    let size = 0;
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > 2 * 1024 * 1024) {
-        await reader.cancel();
-        throw new Error("Response too large.");
-      }
-      text += decoder.decode(chunk.value, { stream: true });
-    }
-    return JSON.parse(text + decoder.decode()) as unknown;
+    return await readJson(reader, 2 * 1024 * 1024);
   } catch {
+    void reader.cancel().catch(() => {});
     throw new Error("The live quota response is invalid, incomplete, or larger than 2 MiB.");
   } finally {
     reader.releaseLock();
@@ -134,7 +122,7 @@ export async function fetchClaudeQuota(
       "Set CLIPROXYAPI_MANAGEMENT_KEY to read live Claude quota. The chat API key is not a management key.",
     );
   }
-  const bounded = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(15000)]);
+  const bounded = deadline(signal, 15000);
   const listing = await managementRequest(config, key, "credentials", bounded);
   if (!isRecord(listing) || !Array.isArray(listing.files) || listing.files.length > 10000) {
     throw new Error("The management API returned an invalid account list.");
@@ -182,7 +170,7 @@ export async function fetchClaudeQuota(
           Authorization: "Bearer $TOKEN$",
           "Content-Type": "application/json",
           "anthropic-beta": "oauth-2025-04-20",
-          // CLIProxyAPI 8.0.63 presents this Claude Code version for OAuth accounts.
+          // CLIProxyAPI 8.0.64 presents this Claude Code version for OAuth accounts.
           "User-Agent": "claude-cli/2.1.321 (external, cli)",
         },
       });

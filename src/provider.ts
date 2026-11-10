@@ -32,8 +32,6 @@ import { withCompactionRecovery } from "./compaction.ts";
 import { type Config, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
 import { generateNativeImages } from "./media.ts";
 
-export type { QuotaWaitHandler } from "./claude-quota.ts";
-
 export function builtinCatalog() {
   return [
     ...getBuiltinModels("anthropic"),

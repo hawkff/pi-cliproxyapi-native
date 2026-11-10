@@ -30,7 +30,7 @@ jobs:
           node-version: 24
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
-          version: 12.16.1
+          version: 12.18.0
       - run: test "v$(jq -r .version package.json)" = "$GITHUB_REF_NAME"
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm check

@@ -1,5 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { type Config, deadline, isModelId, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
+import { type Config, deadline, isModelId, isRecord, PROVIDER_ID, readJson, validateKey } from "./config.ts";
 
 export type CpaApi =
   | "anthropic-messages"
@@ -26,11 +26,13 @@ export function parseCatalog(value: unknown) {
     if (
       !isRecord(entry) ||
       !isModelId(entry.id) ||
-      (entry.owned_by !== undefined && !isModelId(entry.owned_by))
+      (entry.owned_by !== undefined && typeof entry.owned_by !== "string")
     ) {
       throw new Error("Invalid CLIProxyAPI model catalog entry.");
     }
-    return { id: entry.id, owner: entry.owned_by, hidden: entry.visibility === "hide" };
+    // The proxy reports a custom provider's configured name as the owner; it can be empty or contain spaces.
+    const owner = isModelId(entry.owned_by) ? entry.owned_by : undefined;
+    return { id: entry.id, owner, hidden: entry.visibility === "hide" };
   });
 }
 
@@ -52,31 +54,17 @@ export async function fetchCatalog(config: Config, key: string, signal: AbortSig
     await response.body?.cancel();
     throw new Error(`CLIProxyAPI discovery failed (HTTP ${response.status}).`);
   }
-  let payload: unknown;
   const reader = response.body?.getReader();
   if (!reader) throw new Error("CLIProxyAPI discovery returned an empty response.");
   try {
-    const decoder = new TextDecoder();
-    let text = "";
-    let size = 0;
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > 4 * 1024 * 1024) {
-        await reader.cancel();
-        throw new Error("Catalog too large.");
-      }
-      text += decoder.decode(chunk.value, { stream: true });
-    }
-    payload = JSON.parse(text + decoder.decode());
+    return await readJson(reader, 4 * 1024 * 1024);
   } catch {
+    void reader.cancel().catch(() => {});
     signal.throwIfAborted();
     throw new Error("CLIProxyAPI catalog is invalid, incomplete, or larger than 4 MiB.");
   } finally {
     reader.releaseLock();
   }
-  return payload;
 }
 
 // Resolve metadata and capabilities without changing registry or request IDs.

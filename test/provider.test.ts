@@ -334,6 +334,13 @@ test("malformed catalogs fail rather than replacing a working list", () => {
     assert.throws(() => parseCatalog(value));
   }
   assert.deepEqual(parseCatalog({ data: [] }), []);
+  // An owner is only a hint. The proxy reports a custom provider's configured name, which may be empty.
+  const named = { data: ["My Router", "", "claude"].map((owned_by) => ({ id: known[0].id, owned_by })) };
+  assert.deepEqual(
+    parseCatalog(named).map(({ owner }) => owner),
+    [undefined, undefined, "claude"],
+  );
+  assert.equal(mapCatalog(named, parseConfig({}), known).models[0].api, "anthropic-messages");
 });
 
 test("native refresh persists metadata, restores offline, keeps failures, and accepts an empty catalog", async (t) => {
@@ -1099,6 +1106,24 @@ test("live Claude windows distinguish five-hour, weekly, and model-scoped exhaus
   assert.equal(claudeQuotaState(scoped, "claude-opus-fixture", now).weeklyResetAt, undefined);
   assert.equal(claudeQuotaState(scoped, "claude-sonnet-fixture", now).weeklyResetAt, now + 2 * 86400000);
   assert.equal(claudeQuotaState(usage, "claude-opus-fixture", now + 30000, now).retryAt, now + 931000);
+  // Fable has its own weekly window. An active scoped limit for the model replaces it.
+  const reset = new Date(now + 2 * 86400000).toISOString();
+  const fable = { ...claudeUsage(now + 900000, 50), iguana_necktie: { utilization: 100, resets_at: reset } };
+  const limit = (percent: number, is_active = true) => ({
+    kind: "weekly_scoped",
+    is_active,
+    percent,
+    resets_at: reset,
+    scope: { model: { display_name: "Fable 5" } },
+  });
+  assert.equal(claudeQuotaState(fable, "claude-opus-fixture", now).state, "ready");
+  assert.equal(claudeQuotaState(fable, "claude-fable-fixture", now).weeklyResetAt, now + 2 * 86400000);
+  for (const [limits, state] of [
+    [[limit(10)], "ready"],
+    [[limit(10, false)], "blocked"],
+    [[{ ...limit(10), scope: { model: { display_name: "Opus" } } }], "blocked"],
+  ] as const)
+    assert.equal(claudeQuotaState({ ...fable, limits }, "claude-fable-fixture", now).state, state);
   for (const payload of [
     {},
     { five_hour: null },
@@ -2313,6 +2338,8 @@ test("live Pi catalogs add newer metadata, bundled metadata wins, and xAI chat u
     { id: grok.id, owned_by: "xai" },
     { id: `api/${grok.id}` },
   ];
+  const aliased = parseConfig({ aliases: { "team-grok": `xai/${grok.id}` } });
+  assert.equal(mapCatalog({ data: [{ id: "team-grok" }] }, aliased, merged).models[0].api, grok.api);
   const mapped = mapCatalog({ data }, parseConfig({}), merged);
   assert.deepEqual(mapped.skipped, []);
   assert.deepEqual(

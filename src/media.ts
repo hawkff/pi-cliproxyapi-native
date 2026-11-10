@@ -18,7 +18,15 @@ import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { fetchCatalog, mapMediaCatalog, mediaCapability, mediaControls } from "./catalog.ts";
-import { type Config, deadline, isRecord, PROVIDER_ID, validateKey } from "./config.ts";
+import {
+  type Config,
+  deadline,
+  isRecord,
+  PROVIDER_ID,
+  readJson,
+  type StreamReader,
+  validateKey,
+} from "./config.ts";
 import { type DefaultsContext, effectiveMediaDefaults, resolveMediaModel } from "./media-defaults.ts";
 
 type MediaContext = Pick<ExtensionContext, "cwd" | "model"> &
@@ -177,9 +185,10 @@ function mediaOutputOptions(model: string, params: Partial<Static<typeof imagePa
     output_format: params.output_format,
     output_compression: params.output_compression,
     moderation: params.moderation,
-    n: params.n,
+    // One image and no previews are every route's defaults, so only other values need route support.
+    n: params.n === 1 ? undefined : params.n,
     input_fidelity: params.input_fidelity,
-    partial_images: params.partial_images,
+    partial_images: params.partial_images === 0 ? undefined : params.partial_images,
     frame_count: params.frame_count,
     frame_duration_ms: params.frame_duration_ms,
   };
@@ -473,10 +482,6 @@ function openaiImageResponse(
   });
 }
 
-type StreamReader = {
-  read(): Promise<{ done: boolean; value?: Uint8Array }>;
-  cancel(): Promise<void>;
-};
 // Fetch and Node web streams have incompatible DOM typings; both satisfy this shape.
 type ResponseBody = { getReader(): StreamReader & { releaseLock(): void }; cancel(): Promise<void> };
 
@@ -554,11 +559,14 @@ async function readEvents(
     if (size > maxBytes) throw new Error("Response too large.");
     const text = carry + decoder.decode(chunk.value, { stream: true });
     carry = text.endsWith("\r") ? "\r" : "";
-    buffer += (carry ? text.slice(0, -1) : text).replace(/\r\n/g, "\n");
-    for (let end = buffer.indexOf("\n\n", searched); end >= 0; end = buffer.indexOf("\n\n")) {
-      frame(buffer.slice(0, end));
-      buffer = buffer.slice(end + 2);
-    }
+    const lines = (carry ? text.slice(0, -1) : text).replace(/\r\n/g, "\n");
+    buffer += lines;
+    // Image data has no line breaks. Searching after a chunk without one would copy the whole pending frame.
+    if (lines.includes("\n"))
+      for (let end = buffer.indexOf("\n\n", searched); end >= 0; end = buffer.indexOf("\n\n")) {
+        frame(buffer.slice(0, end));
+        buffer = buffer.slice(end + 2);
+      }
     searched = Math.max(0, buffer.length - 1);
   }
   frame(buffer + (carry + decoder.decode()).replace(/\r\n/g, "\n"));
@@ -623,21 +631,7 @@ async function mediaRequest(
   }
   if (!reader) throw new Error("CLIProxyAPI media returned an empty response.");
   try {
-    if (onPartial) return await readEvents(reader, maxBytes, onPartial);
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done || !chunk.value) break;
-      size += chunk.value.byteLength;
-      if (size > maxBytes) {
-        await reader.cancel();
-        throw new Error("Response too large.");
-      }
-      chunks.push(chunk.value);
-    }
-    const result: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    return result;
+    return onPartial ? await readEvents(reader, maxBytes, onPartial) : await readJson(reader, maxBytes);
   } catch {
     void reader.cancel().catch(() => {});
     throw new Error(
@@ -684,12 +678,11 @@ function imageType(bytes: Buffer) {
     extension = "png";
     mimeType = "image/png";
   } else if (
-    bytes.length > 4 &&
     bytes[0] === 0xff &&
     bytes[1] === 0xd8 &&
     bytes[2] === 0xff &&
-    bytes.at(-2) === 0xff &&
-    bytes.at(-1) === 0xd9
+    // Cameras append data after the end marker, so it only has to be present.
+    bytes.includes("ffd9", 3, "hex")
   ) {
     extension = "jpg";
     mimeType = "image/jpeg";

@@ -20,6 +20,26 @@ export function deadline(signal: AbortSignal | undefined, milliseconds: number) 
   return AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(milliseconds)]);
 }
 
+// Fetch and Node web-stream readers both satisfy this shape.
+export type StreamReader = {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel(): Promise<void>;
+};
+
+// Throws on a body over maxBytes or invalid JSON. The caller cancels the reader and reports the failure.
+export async function readJson(reader: StreamReader, maxBytes: number) {
+  const chunks: Uint8Array[] = [];
+  for (let size = 0; ; ) {
+    const chunk = await reader.read();
+    if (chunk.done || !chunk.value) break;
+    size += chunk.value.byteLength;
+    if (size > maxBytes) throw new Error("Response too large.");
+    chunks.push(chunk.value);
+  }
+  const value: unknown = JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)));
+  return value;
+}
+
 export function normalizeBaseUrl(value: string) {
   let url: URL;
   try {
@@ -65,10 +85,10 @@ export function parseConfig(value: unknown, baseUrlOverride?: string) {
       if (
         separator < 1 ||
         !isModelId(reference.slice(separator + 1)) ||
-        !["anthropic", "openai", "openai-codex", "google"].includes(provider)
+        !["anthropic", "openai", "openai-codex", "google", "xai"].includes(provider)
       ) {
         throw new Error(
-          "CLIProxyAPI aliases require an anthropic, openai, openai-codex, or google reference.",
+          "CLIProxyAPI aliases require an anthropic, openai, openai-codex, google, or xai reference.",
         );
       }
       return [id, reference] as const;
