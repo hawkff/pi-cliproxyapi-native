@@ -182,7 +182,8 @@ export async function fetchClaudeQuota(
           Authorization: "Bearer $TOKEN$",
           "Content-Type": "application/json",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-cli/2.1.280 (external, cli)",
+          // CLIProxyAPI 8.0.63 presents this Claude Code version for OAuth accounts.
+          "User-Agent": "claude-cli/2.1.321 (external, cli)",
         },
       });
       if (!isRecord(response) || typeof response.status_code !== "number")

@@ -365,6 +365,10 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       api,
       baseUrl: endpoint(config.baseUrl, api),
       headers: undefined,
+      // CLIProxyAPI gives OAuth Claude caches a one-hour TTL. Only api/ routes keep Pi's five-minute refreshes.
+      ...(api === "anthropic-messages" && prefix !== "api"
+        ? { promptCache: { short: 3600, long: 3600 } }
+        : {}),
       compat:
         api === "anthropic-messages"
           ? {
@@ -374,6 +378,8 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
               supportsMidConvoSystemMessages: false,
               supportsMidConvoToolChanges: false,
               supportsMidConvoEffort: false,
+              // A route that drops the thread field would send only the newest messages.
+              supportsMessageThreads: false,
               allowedFallbackModels: undefined,
             }
           : api === "google-generative-ai"

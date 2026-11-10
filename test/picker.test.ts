@@ -963,6 +963,7 @@ test("media picker and listings show derived defaults without footer output or u
   const sessionManager = SessionManager.inMemory();
   let hooks = 0;
   let footerWrites = 0;
+  let opened: { rendered: string; options: Parameters<ExtensionContext["ui"]["custom"]>[1] } | undefined;
   const output: string[] = [];
   let command: Parameters<ExtensionAPI["registerCommand"]>[1] | undefined;
   let gets = 0;
@@ -997,16 +998,18 @@ test("media picker and listings show derived defaults without footer output or u
       setStatus() {
         footerWrites++;
       },
-      async custom(factory: Parameters<ExtensionContext["ui"]["custom"]>[0]) {
+      async custom(
+        factory: Parameters<ExtensionContext["ui"]["custom"]>[0],
+        options?: Parameters<ExtensionContext["ui"]["custom"]>[1],
+      ) {
         const picker = await factory(
           { terminal: { rows: 14 }, requestRender() {} } as never,
           theme,
           new KeybindingsManager(TUI_KEYBINDINGS) as never,
           () => {},
         );
-        const rendered = picker.render(200).join("\n");
-        assert.match(rendered, /gpt-image-2.6-sunburst.*automatic default/);
-        assert.match(rendered, /gpt-image-2.6-sunburst.*selected/);
+        // The command reports errors thrown here, so the test asserts after the command returns.
+        opened = { rendered: picker.render(200).join("\n"), options };
         return undefined;
       },
     },
@@ -1027,6 +1030,11 @@ test("media picker and listings show derived defaults without footer output or u
     assert.match(output.at(-1) ?? "", /gpt-image-2.6-sunburst.*automatic default/);
   }
   await command.handler("", { ...ctx, mode: "tui" });
+  assert.ok(opened);
+  assert.match(opened.rendered, /gpt-image-2.6-sunburst.*automatic default/);
+  assert.match(opened.rendered, /gpt-image-2.6-sunburst.*selected/);
+  // Terminals that show program status report Pi as waiting for input while the picker is open.
+  assert.equal(opened.options?.blocked?.kind, "question");
   await command.handler(`select ${video}`, ctx);
   assert.deepEqual(readMediaDefaults(config, ctx), { video });
   await command.handler("clear video", ctx);
