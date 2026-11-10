@@ -161,6 +161,9 @@ function route(
         options?.env?.CLIPROXYAPI_MANAGEMENT_KEY ?? process.env.CLIPROXYAPI_MANAGEMENT_KEY ?? "";
       const liveClaude =
         model.api === "anthropic-messages" && !backend && authType !== "api-key" && managementKey !== "";
+      // Pi's cache warmer replays a request with these options. A delayed replay cannot keep a cache warm.
+      const warming =
+        options?.disableContinuation === true && options.maxTokens === 1 && options.maxRetries === 0;
       const adapterModel = google ? { ...model, id: metadataId } : model;
       // Google needs canonical IDs for tool turns. Swap identities to keep bare history cross-route.
       const adapterContext = google
@@ -231,7 +234,7 @@ function route(
             let started = false;
             let retry = false;
             for await (const event of run()) {
-              if (event.type === "error" && event.reason === "error" && !started) {
+              if (event.type === "error" && event.reason === "error" && !started && !warming) {
                 const resetAt = quotaRetryAt(event.error.errorMessage, response);
                 const failure = quotaError(event.error.errorMessage);
                 const upstream =
@@ -320,7 +323,7 @@ export function createCliproxyProvider(
   let skipped: string[] = [];
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
-    .update(JSON.stringify([5, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+    .update(JSON.stringify([6, { baseUrl: config.baseUrl, aliases: config.aliases }]))
     .digest("hex");
   const provider = createProvider<CpaApi>({
     id: PROVIDER_ID,

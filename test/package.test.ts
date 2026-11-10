@@ -35,6 +35,7 @@ test("npm package contains only release files and loads without checkout depende
       })
       .sort(),
     [
+      "CHANGELOG.md",
       "LICENSE",
       "README.md",
       "extensions/index.ts",
@@ -54,7 +55,11 @@ test("npm package contains only release files and loads without checkout depende
     timeout: 10000,
   });
   const manifest: unknown = JSON.parse(await readFile(join(directory, "package/package.json"), "utf8"));
-  assert.ok(isRecord(manifest) && Array.isArray(manifest.keywords));
+  assert.ok(isRecord(manifest) && Array.isArray(manifest.keywords) && typeof manifest.version === "string");
+  // After an update, Pi shows the changelog entries newer than the previously installed version.
+  const heading = `## [${manifest.version}] - `;
+  const changelog = await readFile(join(directory, "package/CHANGELOG.md"), "utf8");
+  assert.ok(changelog.split("\n").some((line) => line.startsWith(heading)));
   for (const keyword of ["pi-package", "pi-extension", "cliproxyapi"])
     assert.ok(manifest.keywords.includes(keyword));
   assert.ok(isRecord(manifest.peerDependencies));

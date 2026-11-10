@@ -295,6 +295,7 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
                   () => tui.requestRender(),
                   done,
                 ),
+              { blocked: { kind: "question", message: "Choose a CLIProxyAPI image or video model" } },
             );
           } else {
             const matches = searchPickerItems(items, query);

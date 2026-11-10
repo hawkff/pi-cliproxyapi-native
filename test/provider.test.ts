@@ -288,6 +288,38 @@ test("Antigravity high IDs use exact metadata fallbacks without changing adverti
   }
 });
 
+test("Claude routes keep message threads off and report one-hour caches except on API keys", () => {
+  const claude: Model<Api> = {
+    ...known[0],
+    promptCache: { short: 300, long: 3600 },
+    compat: { ...known[0].compat, supportsMessageThreads: true },
+  };
+  const ids = [
+    claude.id,
+    ...["oauth", "vertex", "antigravity", "api"].map((prefix) => `${prefix}/${claude.id}`),
+    known[1].id,
+  ];
+  const mapped = mapCatalog({ data: ids.map((id) => ({ id })) }, parseConfig({}), [
+    claude,
+    ...known.slice(1),
+  ]);
+  assert.deepEqual(
+    mapped.models.map(({ id, promptCache }) => [id, promptCache]),
+    ids.map((id) => [
+      id,
+      id === known[1].id
+        ? undefined
+        : id.startsWith("api/")
+          ? claude.promptCache
+          : { short: 3600, long: 3600 },
+    ]),
+  );
+  for (const model of mapped.models.slice(0, -1)) {
+    assert.ok(hasApi(model, "anthropic-messages"));
+    assert.equal(model.compat?.supportsMessageThreads, false);
+  }
+});
+
 test("malformed catalogs fail rather than replacing a working list", () => {
   for (const value of [
     null,
@@ -1029,8 +1061,9 @@ function claudeCooldown(res: ServerResponse) {
       type: "error",
       error: {
         type: "rate_limit_error",
+        // CLIProxyAPI 8.0.58 and newer append the reset delay.
         message:
-          "All credentials for model claude-fixture are cooling down via provider claude (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again later.)",
+          "All credentials for model claude-fixture are cooling down via provider claude (last error: rate_limit_error: This request would exceed your account's rate limit. Please try again later.) (reset after 15m0s)",
       },
     }),
   );
@@ -1571,6 +1604,51 @@ test("late wake-ups cannot retry chat after the quota deadline even when live qu
       assert.equal(result.stopReason, "error");
       assert.match(result.errorMessage ?? "", /waiting deadline/);
       assert.equal(isRetryableAssistantError(result), false);
+    });
+});
+
+test("cache-warming replays skip quota waits, and other requests without continuation still wait", async (t) => {
+  for (const [name, live, warming] of [
+    ["header replay", false, true],
+    ["live replay", true, true],
+    ["request without continuation", false, false],
+  ] as const)
+    await t.test(name, async (t) => {
+      let requests = 0;
+      let waits = 0;
+      const controller = new AbortController();
+      const baseUrl = await server(t, (req, res) => {
+        req.resume();
+        requests++;
+        if (live) claudeCooldown(res);
+        else res.writeHead(429, { "retry-after": "900" }).end();
+      });
+      const seen = mockClaudeManagement(t, baseUrl, () => claudeUsage(Date.now() + 900000));
+      const config = parseConfig({ baseUrl });
+      const provider = createCliproxyProvider(config, known, (_id, seconds) => {
+        if (seconds === undefined) return;
+        waits++;
+        controller.abort();
+      });
+      const result = await provider
+        .streamSimple(
+          mapCatalog(catalog, config, known).models[0],
+          normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+          {
+            apiKey: key,
+            // Pi's cache warmer replays the last request with a one-token cap and no retries.
+            maxTokens: warming ? 1 : 32,
+            maxRetries: 0,
+            disableContinuation: true,
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]),
+            env: { CLIPROXYAPI_MANAGEMENT_KEY: live ? "fixture-management-key" : "" },
+          },
+        )
+        .result();
+      assert.equal(result.stopReason, warming ? "error" : "aborted", result.errorMessage);
+      assert.equal(waits, warming ? 0 : 1);
+      assert.equal(requests, 1);
+      assert.deepEqual(seen.urls, []);
     });
 });
 
@@ -2186,6 +2264,32 @@ test("previous-policy caches cannot restore GPT-image chat aliases", async (t) =
       },
     });
     assert.deepEqual(provider.getModels(), []);
+  }
+});
+
+test("previous cache-policy catalogs cannot restore five-minute Claude refreshes or message threads", async (t) => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("Offline restoration must not contact the proxy"));
+  const config = parseConfig({});
+  for (const version of [5, 6]) {
+    const provider = createCliproxyProvider(config, known);
+    await provider.refreshModels({
+      allowNetwork: false,
+      signal: AbortSignal.timeout(5000),
+      stored: {
+        etag: createHash("sha256")
+          .update(JSON.stringify([version, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+          .digest("hex"),
+        models: [
+          { ...known[0], provider: PROVIDER_ID, headers: undefined, promptCache: { short: 300, long: 3600 } },
+        ],
+      },
+      async publish(publication) {
+        publication.update?.();
+        return true;
+      },
+    });
+    // The current policy restores the same entry, so only the version blocks the older cache.
+    assert.equal(provider.getModels().length, version === 6 ? 1 : 0);
   }
 });
 
