@@ -7,6 +7,7 @@ import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
@@ -1571,7 +1572,8 @@ test("live quota lookups slow to every ten minutes while the reset is far away",
   timeout: 10000,
 }, async (t) => {
   const now = Date.parse("2030-01-01T00:00:00Z");
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now });
+  // Only the clock is mocked. The wait sleeps on real timers, one second at a time.
+  t.mock.timers.enable({ apis: ["Date"], now });
   const config = parseConfig({ baseUrl: "https://proxy.example" });
   const waiting = Promise.withResolvers<void>();
   const refreshed = Promise.withResolvers<void>();
@@ -1580,24 +1582,29 @@ test("live quota lookups slow to every ten minutes while the reset is far away",
     return claudeUsage(now + 5 * 3600000);
   });
   const controller = new AbortController();
-  const wait = waitForClaudeQuota(
-    config,
-    "fixture-management-key",
-    known[0].id,
-    now + 7 * 86400000,
-    controller.signal,
-    (_id, seconds) => {
-      if (seconds !== undefined) waiting.resolve();
-    },
+  // The wait ends with the test, also when an assertion fails first.
+  t.after(() => controller.abort());
+  const stopped = assert.rejects(
+    waitForClaudeQuota(
+      config,
+      "fixture-management-key",
+      known[0].id,
+      now + 7 * 86400000,
+      controller.signal,
+      (_id, seconds) => {
+        if (seconds !== undefined) waiting.resolve();
+      },
+    ),
   );
   await waiting.promise;
+  // Just under ten minutes later the wait wakes from its sleep and must not look up again.
   t.mock.timers.tick(599999);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await sleep(1200);
   assert.equal(seen.calls, 1);
   t.mock.timers.tick(1);
   await refreshed.promise;
   controller.abort();
-  await assert.rejects(wait);
+  await stopped;
 });
 
 test("a quota wait shows a countdown in the session and clears it when the wait ends", {
@@ -1647,8 +1654,9 @@ test("a quota wait shows a countdown in the session and clears it when the wait 
   for (const handler of loaded.extensions[0].handlers.get("session_start") ?? [])
     await handler({ type: "session_start" }, ctx);
   // A frozen clock keeps the countdown at the full delay.
-  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2030-01-01T00:00:00Z") });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2030-01-01T00:00:00Z") });
   const controller = new AbortController();
+  t.after(() => controller.abort());
   const result = loaded.runtime.pendingNativeProviderRegistrations[0].provider
     .streamSimple(
       mapCatalog(catalog, parseConfig({ baseUrl }), known).models[1],
