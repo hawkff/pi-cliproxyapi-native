@@ -257,6 +257,8 @@ test("image responses reject malformed base64, unsupported bytes and URL-only re
     { data: [{ b64_json: "" }] },
     { data: [{ b64_json: "!!!!" }] },
     { data: [{ b64_json: "aGVsbG8=" }] },
+    // A JPEG start without an end marker.
+    { data: [{ b64_json: "/9j/AAA=" }] },
     { data: [{ b64_json: png }, { b64_json: png }] },
   ]) {
     result = value;
@@ -1567,7 +1569,12 @@ test("image and video output controls reach only the selected backend's wire fie
     }
   }
   for (const model of ids.slice(0, 3)) {
-    await generateImage(config, { model, prompt: "fixture", resolution: "2k", aspect_ratio: "20:9" }, ctx);
+    // One image and no previews are the defaults, so every route accepts them.
+    await generateImage(
+      config,
+      { model, prompt: "fixture", resolution: "2k", aspect_ratio: "20:9", n: 1, partial_images: 0 },
+      ctx,
+    );
     assert.deepEqual(requests.at(-1), {
       path: "/gateway/v1/images/generations",
       body: {
@@ -1739,9 +1746,11 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     })}/gateway`,
   });
   const ctx = context(await home(t));
+  // Phone cameras append data after the JPEG end marker.
+  const photo = Buffer.concat([Buffer.from(jpeg, "base64"), Buffer.from("SEFT")]).toString("base64");
   const files = [
     ["source.png", png],
-    ["reference.jpg", jpeg],
+    ["reference.jpg", photo],
     ["mask.png", png],
   ];
   for (const [name, data] of files) await writeFile(join(ctx.cwd, name), Buffer.from(data, "base64"));
@@ -1766,7 +1775,7 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     n: 1,
     quality: "high",
     input_fidelity: "high",
-    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${jpeg}` }],
+    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${photo}` }],
     mask: { image_url: `data:image/png;base64,${png}` },
   });
   assert.deepEqual(progress, ["Editing image...", "Saving image..."]);
@@ -2351,14 +2360,18 @@ test("partial previews stream over the image transport and only the final image 
         // Split the CRLF separator between two writes so the reader sees CR and LF in separate chunks.
         const invalid = { type: "image_generation.partial_image", b64_json: "!!!!", partial_image_index: 1 };
         res.write(`event: ${invalid.type}\r\ndata: ${JSON.stringify(invalid)}\r\n\r`);
-        void sleep(25).then(() => {
+        void sleep(25).then(async () => {
           res.write("\n");
           if (mode === "error") send({ type: "error", error: { message: `Moderation blocked ${key}` } });
           else if (mode === "success") {
             const usage = { input_tokens: 10, output_tokens: 300, total_tokens: 310 };
             const frame = `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: png, usage })}\n\n`;
-            res.write(frame.slice(0, 20));
-            res.write(frame.slice(20));
+            // Node 24 and newer deliver writes from one turn as one chunk, so a pause keeps the parts apart.
+            // The first two have no line break, like the image data in a large frame.
+            for (const part of [frame.slice(0, 20), frame.slice(20, 60), frame.slice(60)]) {
+              await sleep(25);
+              res.write(part);
+            }
           }
           res.end();
         });
