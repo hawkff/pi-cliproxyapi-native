@@ -1,5 +1,5 @@
 export const PROVIDER_ID = "cliproxyapi";
-export const DEFAULT_BASE_URL = "http://localhost:8317";
+const DEFAULT_BASE_URL = "http://localhost:8317";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

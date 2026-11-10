@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { modelRoute } from "./catalog.ts";
+import { configuredAlias, modelRoute } from "./catalog.ts";
 import { type Config, deadline, isRecord, readJson } from "./config.ts";
 
 export type QuotaWaitHandler = (id: symbol, remainingSeconds: number | undefined) => void;
@@ -139,9 +139,7 @@ export async function fetchClaudeQuota(
   // ponytail: probe at most 100 accounts; batch larger pools before raising this limit.
   if (accounts.length > 100)
     throw new Error("Live quota lookup supports at most 100 active Claude accounts.");
-  const { metadataId, prefix } = modelRoute(modelId);
-  const reference =
-    config.aliases[modelId] ?? (prefix ? config.aliases[metadataId] : undefined) ?? metadataId;
+  const reference = configuredAlias(config, modelId) ?? modelRoute(modelId).metadataId;
   const results = await Promise.allSettled(
     accounts.map(async (account: unknown) => {
       if (
@@ -252,7 +250,9 @@ export async function waitForClaudeQuota(
         );
       if (quota.state === "ready") return retryAt !== undefined;
       retryAt = quota.retryAt;
-      const refreshAt = Math.min(quota.retryAt, Date.now() + 60000);
+      // Every waiting session repeats this lookup, so it slows to every ten minutes far from the reset.
+      const wait = quota.retryAt - Date.now();
+      const refreshAt = Date.now() + Math.min(wait, Math.max(60000, Math.min(Math.floor(wait / 20), 600000)));
       while (Date.now() < refreshAt) {
         signal?.throwIfAborted();
         onWait?.(id, Math.max(0, Math.ceil((quota.retryAt - Date.now()) / 1000)));

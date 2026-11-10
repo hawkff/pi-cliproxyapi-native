@@ -26,11 +26,13 @@ import {
   generateImage,
   generateVideo,
   listMediaModels,
+  readEvents,
   registerMediaTools,
   videoStatus,
 } from "../src/media.ts";
 import { MEDIA_DEFAULTS_ENTRY } from "../src/media-defaults.ts";
 import { builtinCatalog } from "../src/provider.ts";
+import { server } from "./server.ts";
 
 const key = "fixture-media-key";
 const imageModel = "grok-imagine-image";
@@ -76,21 +78,6 @@ function context(cwd: string) {
       },
     },
   };
-}
-
-async function server(t: TestContext, handler: (req: IncomingMessage, res: ServerResponse) => void) {
-  const instance = createServer(handler);
-  instance.listen(0, "127.0.0.1");
-  await once(instance, "listening");
-  t.after(async () => {
-    const closed = once(instance, "close");
-    instance.close();
-    instance.closeAllConnections();
-    await closed;
-  });
-  const address = instance.address();
-  assert.ok(address && typeof address !== "string");
-  return `http://127.0.0.1:${address.port}`;
 }
 
 async function body(req: IncomingMessage) {
@@ -1748,9 +1735,11 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
   const ctx = context(await home(t));
   // Phone cameras append data after the JPEG end marker.
   const photo = Buffer.concat([Buffer.from(jpeg, "base64"), Buffer.from("SEFT")]).toString("base64");
+  // A file name may start with "data:"; only a data URL is refused as image data.
   const files = [
     ["source.png", png],
     ["reference.jpg", photo],
+    ["data:extra.png", png],
     ["mask.png", png],
   ];
   for (const [name, data] of files) await writeFile(join(ctx.cwd, name), Buffer.from(data, "base64"));
@@ -1760,7 +1749,7 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     {
       model,
       prompt: "fixture",
-      images: ["source.png", join(ctx.cwd, "reference.jpg")],
+      images: ["source.png", join(ctx.cwd, "reference.jpg"), "data:extra.png"],
       mask: "mask.png",
       input_fidelity: "high",
       quality: "high",
@@ -1775,7 +1764,11 @@ test("OpenAI editing uploads bounded local files and a mask to the exact edit ro
     n: 1,
     quality: "high",
     input_fidelity: "high",
-    images: [{ image_url: `data:image/png;base64,${png}` }, { image_url: `data:image/jpeg;base64,${photo}` }],
+    images: [
+      { image_url: `data:image/png;base64,${png}` },
+      { image_url: `data:image/jpeg;base64,${photo}` },
+      { image_url: `data:image/png;base64,${png}` },
+    ],
     mask: { image_url: `data:image/png;base64,${png}` },
   });
   assert.deepEqual(progress, ["Editing image...", "Saving image..."]);
@@ -1935,6 +1928,13 @@ test("invalid OpenAI controls and edit inputs fail before authentication or netw
     ),
     /limits/,
   );
+  // Image data passed where a path belongs is rejected without repeating it.
+  for (const input of [`data:image/png;base64,${png}`, "A".repeat(4097)])
+    await assert.rejects(
+      generateImage(config, { model: "api/gpt-image-2", prompt: "fixture", images: [input] }, ctx),
+      (error: unknown) =>
+        error instanceof Error && /local image paths/.test(error.message) && !error.message.includes(input),
+    );
   assert.equal(ctx.modelRegistry.getProviderAuth.mock.callCount(), 0);
   assert.equal(network.mock.callCount(), 0);
   assert.ok(!(await readdir(ctx.cwd)).includes(".pi"));
@@ -2008,7 +2008,7 @@ test("multi-image output cleans up a partial save and isolates concurrent genera
   try {
     await assert.rejects(generateImage(config, params, ctx), /could not save/);
     assert.equal(writes, 2);
-    assert.deepEqual(await readdir(join(ctx.cwd, ".pi")), []);
+    assert.deepEqual(await readdir(ctx.cwd), []);
   } finally {
     mocked.mock.restore();
     syncBuiltinESMExports();
@@ -2018,6 +2018,52 @@ test("multi-image output cleans up a partial save and isolates concurrent genera
   assert.equal(new Set(files.map((file) => file.path)).size, 4);
   assert.equal((await readdir(join(ctx.cwd, ".pi"))).length, 2);
   for (const file of files) assert.equal((await readFile(file.path)).toString("base64"), png);
+});
+
+test("an output directory that cannot be created fails the call before the image request", async (t) => {
+  let posts = 0;
+  const config = parseConfig({
+    baseUrl: await server(t, (req, res) => {
+      if (req.method === "POST") posts++;
+      res.end(JSON.stringify(req.method === "GET" ? catalog : { data: [{ b64_json: png }] }));
+    }),
+  });
+  const ctx = context(await home(t));
+  // A file named .pi blocks the directory.
+  await writeFile(join(ctx.cwd, ".pi"), "keep");
+  await assert.rejects(
+    generateImage(config, { model: imageModel, prompt: "fixture" }, ctx),
+    /cannot create \.pi\/.*Nothing was generated/,
+  );
+  assert.equal(posts, 0);
+  assert.equal(await readFile(join(ctx.cwd, ".pi"), "utf8"), "keep");
+});
+
+test("the image event reader stays fast when a large frame arrives in small chunks", async () => {
+  const image = "A".repeat(4 * 1024 * 1024);
+  const bytes = Buffer.from(
+    `data: ${JSON.stringify({ type: "image_generation.completed", b64_json: image })}\n\n`,
+  );
+  let offset = 0;
+  const started = performance.now();
+  const events = await readEvents(
+    {
+      read: async () => {
+        const value = bytes.subarray(offset, offset + 256);
+        offset += 256;
+        return value.length ? { done: false, value } : { done: true };
+      },
+      cancel: async () => {},
+    },
+    bytes.length,
+    () => assert.fail("The stream has no preview frames"),
+  );
+  assert.deepEqual(
+    events.map((event) => [event.type, event.b64_json === image]),
+    [["image_generation.completed", true]],
+  );
+  // Searching the pending frame after every chunk copies it each time, which takes several seconds here.
+  assert.ok(performance.now() - started < 2000);
 });
 
 test("OpenAI caller cancellation and overall timeout destroy an incoming body after partial data", {

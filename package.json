@@ -1,6 +1,6 @@
 {
   "name": "pi-cliproxyapi-native",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "CLIProxyAPI chat discovery, image generation and editing, and video generation with Pi's native adapters",
   "publishConfig": {
     "access": "public"

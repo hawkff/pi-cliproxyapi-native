@@ -22,18 +22,26 @@ export function parseCatalog(value: unknown) {
   if (!isRecord(value) || !Array.isArray(value.data) || value.data.length > 10000) {
     throw new Error("Invalid CLIProxyAPI model catalog: expected a data array.");
   }
-  return value.data.map((entry: unknown) => {
+  const entries = value.data.flatMap((entry: unknown) => {
     if (
       !isRecord(entry) ||
-      !isModelId(entry.id) ||
+      typeof entry.id !== "string" ||
       (entry.owned_by !== undefined && typeof entry.owned_by !== "string")
     ) {
       throw new Error("Invalid CLIProxyAPI model catalog entry.");
     }
+    // The proxy accepts any text as a model alias. An ID with spaces or other characters that requests and
+    // the terminal cannot carry safely is skipped, so the rest of the catalog stays available.
+    if (!isModelId(entry.id)) return [];
     // The proxy reports a custom provider's configured name as the owner; it can be empty or contain spaces.
     const owner = isModelId(entry.owned_by) ? entry.owned_by : undefined;
-    return { id: entry.id, owner, hidden: entry.visibility === "hide" };
+    return [{ id: entry.id, owner, hidden: entry.visibility === "hide" }];
   });
+  // A response with entries but no usable ID is not an empty catalog, and must not replace a working list.
+  if (value.data.length && !entries.length) {
+    throw new Error("Invalid CLIProxyAPI model catalog: no usable model ID.");
+  }
+  return entries;
 }
 
 export async function fetchCatalog(config: Config, key: string, signal: AbortSignal) {
@@ -77,6 +85,13 @@ export function modelRoute(id: string) {
     backend: prefix === "vertex" ? "Vertex" : prefix === "antigravity" ? "Antigravity" : undefined,
     authType: prefix === "api" ? "api-key" : prefix === "oauth" ? "oauth" : undefined,
   };
+}
+
+// An alias for the full ID wins. A recognized route prefix can reuse its unprefixed ID's alias.
+export function configuredAlias(config: Config, id: string) {
+  const { metadataId, prefix } = modelRoute(id);
+  if (Object.hasOwn(config.aliases, id)) return config.aliases[id];
+  return prefix && Object.hasOwn(config.aliases, metadataId) ? config.aliases[metadataId] : undefined;
 }
 
 export function backendLabel(id: string) {
@@ -308,13 +323,9 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
     if (entry.hidden || models.has(entry.id) || mediaPurpose(entry.id)) continue;
     const { metadataId, prefix } = modelRoute(entry.id);
     const routed = !entry.id.includes("/") || prefix;
-    const alias = Object.hasOwn(config.aliases, entry.id)
-      ? config.aliases[entry.id]
-      : prefix && Object.hasOwn(config.aliases, metadataId)
-        ? config.aliases[metadataId]
-        : routed && !byId.has(metadataId)
-          ? metadataFallbacks.get(metadataId)
-          : undefined;
+    const alias =
+      configuredAlias(config, entry.id) ??
+      (routed && !byId.has(metadataId) ? metadataFallbacks.get(metadataId) : undefined);
     const candidates = (alias ? byReference.get(alias) : routed ? byId.get(metadataId) : undefined) ?? [];
     const families = new Set(
       candidates.map((model) => (model.provider === "openai-codex" ? "openai" : model.provider)),

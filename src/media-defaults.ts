@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type MediaPurpose, mediaCapability, mediaPurpose, modelRoute } from "./catalog.ts";
+import { configuredAlias, type MediaPurpose, mediaCapability, mediaPurpose, modelRoute } from "./catalog.ts";
 import { type Config, isModelId, isRecord, PROVIDER_ID } from "./config.ts";
 
 export const MEDIA_DEFAULTS_ENTRY = "cliproxyapi-media-defaults";
@@ -34,15 +34,8 @@ export function readMediaDefaults(config: Config, ctx: DefaultsContext) {
 export function automaticImageDefault(config: Config, ctx: DefaultsContext) {
   const model = ctx.model;
   if (!model || mediaPurpose(model.id)) return undefined;
-  const { metadataId, prefix } = modelRoute(model.id);
-  const alias =
-    model.provider === PROVIDER_ID
-      ? Object.hasOwn(config.aliases, model.id)
-        ? config.aliases[model.id]
-        : prefix && Object.hasOwn(config.aliases, metadataId)
-          ? config.aliases[metadataId]
-          : undefined
-      : undefined;
+  const { metadataId } = modelRoute(model.id);
+  const alias = model.provider === PROVIDER_ID ? configuredAlias(config, model.id) : undefined;
   const openai = alias
     ? /^(openai|openai-codex)\//.test(alias)
     : model.provider === "openai" ||
