@@ -21,6 +21,7 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
   - [Refresh](#refresh)
   - [Wait for quota reset](#wait-for-quota-reset)
   - [Retry failed turns](#retry-failed-turns)
+  - [Prompt cache refreshes](#prompt-cache-refreshes)
   - [Compaction](#compaction)
   - [Aliases and model limits](#aliases-and-model-limits)
 - [Backend routes](#backend-routes)
@@ -31,15 +32,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.5.0 and CLIProxyAPI 8.0.57, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.5.1 and CLIProxyAPI 8.0.63, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.5
+pi install npm:pi-cliproxyapi-native@0.3.6
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.5`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.6`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -93,7 +94,7 @@ Open `/cli:model` to search the live image/video catalog, or use its subcommands
 
 Search by friendly name, exact ID, backend, owner, or image/video purpose. The picker shows known media models, including disabled entries with a reason. It omits chat models and unknown IDs.
 
-The terminal picker is keyboard-only. Type to search, use the selection keys to move, press Enter to select, or Escape to cancel. It respects custom selection keybindings. Mouse clicks and wheel events do not change selection.
+The terminal picker is keyboard-only. Type to search, use the selection keys to move, press Enter to select, or Escape to cancel. It respects custom selection keybindings. Mouse clicks and wheel events do not change selection. Terminals that show program status mark Pi as waiting for input while the picker is open.
 
 Starting session or branch navigation discards pending picker commands, even if another extension later cancels navigation. Run the selection again if you stay on the same branch.
 
@@ -291,6 +292,14 @@ Escape or Ctrl+C cancels a pending retry in the terminal. New input, a model cha
 
 Retries preserve the conversation rather than replaying the original prompt. They do not fix credentials or increase quotas, and resumed work can incur provider charges. Use `/auto-retry off` if a persistent error needs manual correction.
 
+### Prompt cache refreshes
+
+Pi refreshes a Claude prompt cache in the background so it doesn't expire between requests. Pi 1.5.1 does this by default, during runs and for up to 30 minutes after them. Set Pi's `cacheWarming` setting to `"streaming"` to limit refreshes to active runs, or to `"off"` to stop them.
+
+CLIProxyAPI keeps OAuth Claude caches for an hour. The extension reports a one-hour cache lifetime for Claude on unprefixed, `oauth/`, `vertex/`, and `antigravity/` routes, so Pi doesn't refresh those caches. `api/` routes keep Anthropic's five-minute lifetime. Pi refreshes them when it estimates that a refresh saves at least $0.05. If your unprefixed Claude IDs reach API keys, select their `api/` IDs, or set `promptCache` for those IDs through `modelOverrides` in Pi's `models.json`.
+
+A refresh that hits a quota limit fails without waiting for the reset. Chat and compaction requests keep the quota waits described above.
+
 ### Compaction
 
 For automatic compaction and `/compact`, the extension limits medium or higher thinking to low without changing your chat thinking level. It uses Pi's default thinking budgets for these requests. Without an explicit output cap, summaries use the model's output limit. Pi's native adapters reduce the output allowance when needed to fit the remaining context space.
@@ -303,7 +312,7 @@ Authentication failures, exhausted quotas, and inputs that exceed the model's co
 
 ### Aliases and model limits
 
-The chat catalog skips unknown IDs rather than guessing their capabilities. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out.
+The chat catalog skips unknown IDs rather than guessing their capabilities. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out. For example, CLIProxyAPI 8.0.63 lists `gpt-6-chat-thinking` and `gemini-omni-1.2-flash`, which have no metadata in Pi 1.5.1, so `/cliproxyapi-refresh` reports them as not registered until you add an alias. Pi 1.5.1 includes `claude-fable-5-2`, which registers without one.
 
 To describe a proxy alias, add a canonical metadata reference to `~/.pi/agent/pi-cliproxyapi.json`:
 
@@ -385,7 +394,7 @@ Run `/reload` after changing settings and `/cliproxyapi-refresh` before starting
 
 ## Protocol notes
 
-Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields.
+Claude uses the legacy fine-grained tool-streaming header in place of eager tool fields. Claude message threads stay off, because a proxy route that drops the `thread` field would send only the newest messages.
 
 GPT models keep Pi's OpenAI Responses capabilities when the proxy lists them as owned by OpenAI. These capabilities are strict tools, grammar tools such as codemode, tool declarations added mid-conversation, tool search, and instructions placed mid-conversation. Each passed live checks through CLIProxyAPI 8.0.48 with an OpenAI API key and with a ChatGPT subscription. OpenAI-compatible providers and other model families keep these capabilities off.
 
@@ -393,11 +402,11 @@ On `api/` routes, Pi can send thinking effort as a `configuration_update` item. 
 
 When Pi omits strictness in the top-level Responses tool list, the extension sends `strict: null`, so optional arguments remain optional. Tools declared inside the conversation keep Pi's strictness values. Explicit payload hooks retain final control.
 
-OpenAI images POST `model`, `prompt`, `n`, and supplied controls to `/v1/images/generations`, without `response_format`. Editing uses `/v1/images/edits` with JSON `images` and optional `mask` or `markup` data URLs. A nonzero `partial_images` adds `stream: true`, and the extension reads server-sent events. Each `*.partial_image` frame becomes a progress preview, and the `*.completed` frame carries the final image and usage. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
+OpenAI images POST `model`, `prompt`, `n`, and supplied controls to `/v1/images/generations`, without `response_format`. Editing uses `/v1/images/edits` with JSON `images` and optional `mask` or `markup` data URLs. A nonzero `partial_images` adds `stream: true`, and the extension reads server-sent events. With `streaming.keepalive-seconds` set, streamed previews need CLIProxyAPI 8.0.60 or newer, because older versions could insert keep-alive comments inside an image event. Each `*.partial_image` frame becomes a progress preview, and the `*.completed` frame carries the final image and usage. xAI uses the same route with `response_format: "b64_json"`. Gemini uses `/v1beta/models/{id}:generateContent`. Media generation sends the prompt and generation options without chat history, system instructions, or tools.
 
 OpenAI image POSTs use a dedicated HTTP connection. It follows `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` from the environment, where Pi also places its `httpProxy` setting, on Node 22.21+ and 24.5+. Older Node versions connect directly. The connection disables socket timeouts so the ten-minute deadline controls the request, requests identity encoding, and rejects compressed responses.
 
-The OpenAI image implementation follows CLIProxyAPI v8.0.57's [image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.57/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.57/internal/runtime/executor/codex_openai_images.go), plus the OpenAI [generation](https://developers.openai.com/api/reference/resources/images/methods/generate) and [editing](https://developers.openai.com/api/reference/resources/images/methods/edit) references. The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
+The OpenAI image implementation follows CLIProxyAPI v8.0.63's [image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.63/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v8.0.63/internal/runtime/executor/codex_openai_images.go), plus the OpenAI [generation](https://developers.openai.com/api/reference/resources/images/methods/generate) and [editing](https://developers.openai.com/api/reference/resources/images/methods/edit) references. The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
 
 ## License
 
