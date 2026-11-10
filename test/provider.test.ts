@@ -3,10 +3,11 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
@@ -22,10 +23,11 @@ import {
   type Model,
   normalizeContext,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import extension from "../extensions/index.ts";
 import { IMAGE_API, mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
-import { claudeQuotaState, fetchClaudeQuota } from "../src/claude-quota.ts";
+import { claudeQuotaState, fetchClaudeQuota, waitForClaudeQuota } from "../src/claude-quota.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
 import {
   builtinCatalog,
@@ -35,6 +37,7 @@ import {
   nonStrictTools,
   quotaRetryAt,
 } from "../src/provider.ts";
+import { server } from "./server.ts";
 
 const key = "fixture-api-key";
 const known: Model<Api>[] = [
@@ -65,21 +68,6 @@ const known: Model<Api>[] = [
 }));
 const catalog = { data: known.map(({ id, provider }) => ({ id, owned_by: provider })) };
 const noEnvironment = { env: async () => undefined, fileExists: async () => false };
-
-async function server(t: TestContext, handler: (req: IncomingMessage, res: ServerResponse) => void) {
-  const instance = createServer(handler);
-  instance.listen(0, "127.0.0.1");
-  await once(instance, "listening");
-  t.after(async () => {
-    const closed = once(instance, "close");
-    instance.close();
-    instance.closeAllConnections();
-    await closed;
-  });
-  const address = instance.address();
-  assert.ok(address && typeof address !== "string");
-  return `http://127.0.0.1:${address.port}`;
-}
 
 async function collection(baseUrl: string, store = new InMemoryModelsStore(), authenticated = true) {
   const credentials = new InMemoryCredentialStore();
@@ -320,13 +308,14 @@ test("Claude routes keep message threads off and report one-hour caches except o
   }
 });
 
-test("malformed catalogs fail rather than replacing a working list", () => {
+test("malformed catalogs fail rather than replacing a working list, and unusable IDs are skipped", () => {
   for (const value of [
     null,
     {},
     { data: null },
     { data: [null] },
     { data: [{}] },
+    { data: [{ id: 7 }] },
     { data: [{ id: "bad\nvalue" }] },
     { data: [{ id: "valid", owned_by: {} }] },
     { data: Array(10001).fill({ id: "fixture" }) },
@@ -341,6 +330,12 @@ test("malformed catalogs fail rather than replacing a working list", () => {
     [undefined, undefined, "claude"],
   );
   assert.equal(mapCatalog(named, parseConfig({}), known).models[0].api, "anthropic-messages");
+  // The proxy accepts any text as a model alias. One that requests cannot carry must not hide the rest.
+  const ids = ["bad\nvalue", "two words", "", "モデル", "x".repeat(257), known[0].id];
+  assert.deepEqual(
+    parseCatalog({ data: ids.map((id) => ({ id })) }).map(({ id }) => id),
+    [known[0].id],
+  );
 });
 
 test("native refresh persists metadata, restores offline, keeps failures, and accepts an empty catalog", async (t) => {
@@ -371,9 +366,12 @@ test("native refresh persists metadata, restores offline, keeps failures, and ac
   assert.ok(!failed.errors.get(PROVIDER_ID)?.message.includes(key));
   assert.equal(second.provider.getModels().length, 5);
   status = 200;
-  body = { broken: true };
-  assert.equal((await second.models.refresh()).errors.size, 1);
-  assert.equal(second.provider.getModels().length, 5);
+  // A catalog without one usable ID is broken, not empty.
+  for (const broken of [{ broken: true }, { data: [{ id: "" }] }]) {
+    body = broken;
+    assert.equal((await second.models.refresh()).errors.size, 1);
+    assert.equal(second.provider.getModels().length, 5);
+  }
   body = { data: [] };
   await second.models.refresh();
   assert.equal(second.provider.getModels().length, 0);
@@ -1106,7 +1104,7 @@ test("live Claude windows distinguish five-hour, weekly, and model-scoped exhaus
   assert.equal(claudeQuotaState(scoped, "claude-opus-fixture", now).weeklyResetAt, undefined);
   assert.equal(claudeQuotaState(scoped, "claude-sonnet-fixture", now).weeklyResetAt, now + 2 * 86400000);
   assert.equal(claudeQuotaState(usage, "claude-opus-fixture", now + 30000, now).retryAt, now + 931000);
-  // Fable has its own weekly window. An active scoped limit for the model replaces it.
+  // Fable has its own weekly window. An active scoped limit, which Claude reports as "Fable", replaces it.
   const reset = new Date(now + 2 * 86400000).toISOString();
   const fable = { ...claudeUsage(now + 900000, 50), iguana_necktie: { utilization: 100, resets_at: reset } };
   const limit = (percent: number, is_active = true) => ({
@@ -1114,7 +1112,7 @@ test("live Claude windows distinguish five-hour, weekly, and model-scoped exhaus
     is_active,
     percent,
     resets_at: reset,
-    scope: { model: { display_name: "Fable 5" } },
+    scope: { model: { display_name: "Fable" }, surface: null },
   });
   assert.equal(claudeQuotaState(fable, "claude-opus-fixture", now).state, "ready");
   assert.equal(claudeQuotaState(fable, "claude-fable-fixture", now).weeklyResetAt, now + 2 * 86400000);
@@ -1565,6 +1563,114 @@ test("OAuth alias quota lookup uses canonical metadata and prefers the full alia
   assert.equal((await fetchClaudeQuota(config, "fixture-management-key", id)).state, "blocked");
   config.aliases[id] = "anthropic/claude-sonnet-fixture";
   assert.equal((await fetchClaudeQuota(config, "fixture-management-key", id)).state, "ready");
+  // An ID that matches a built-in object property name has no alias.
+  seen.modelIds = ["constructor"];
+  assert.equal((await fetchClaudeQuota(config, "fixture-management-key", "constructor")).state, "ready");
+});
+
+test("live quota lookups slow to every ten minutes while the reset is far away", {
+  timeout: 10000,
+}, async (t) => {
+  const now = Date.parse("2030-01-01T00:00:00Z");
+  // Only the clock is mocked. The wait sleeps on real timers, one second at a time.
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const config = parseConfig({ baseUrl: "https://proxy.example" });
+  const waiting = Promise.withResolvers<void>();
+  const refreshed = Promise.withResolvers<void>();
+  const seen = mockClaudeManagement(t, config.baseUrl, () => {
+    if (seen.calls === 2) refreshed.resolve();
+    return claudeUsage(now + 5 * 3600000);
+  });
+  const controller = new AbortController();
+  // The wait ends with the test, also when an assertion fails first.
+  t.after(() => controller.abort());
+  const stopped = assert.rejects(
+    waitForClaudeQuota(
+      config,
+      "fixture-management-key",
+      known[0].id,
+      now + 7 * 86400000,
+      controller.signal,
+      (_id, seconds) => {
+        if (seconds !== undefined) waiting.resolve();
+      },
+    ),
+  );
+  await waiting.promise;
+  // Just under ten minutes later the wait wakes from its sleep and must not look up again.
+  t.mock.timers.tick(599999);
+  await sleep(1200);
+  assert.equal(seen.calls, 1);
+  t.mock.timers.tick(1);
+  await refreshed.promise;
+  controller.abort();
+  await stopped;
+});
+
+test("a quota wait shows a countdown in the session and clears it when the wait ends", {
+  timeout: 10000,
+}, async (t) => {
+  const baseUrl = await server(t, (req, res) => {
+    req.resume();
+    res.writeHead(429, { "retry-after": "3180" }).end();
+  });
+  const directory = await mkdtemp(join(tmpdir(), "pi-cliproxyapi-quota-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const [name, value] of Object.entries({
+    PI_CODING_AGENT_DIR: directory,
+    CLIPROXYAPI_BASE_URL: baseUrl,
+  })) {
+    const previous = process.env[name];
+    process.env[name] = value;
+    t.after(() => {
+      if (previous === undefined) delete process.env[name];
+      else process.env[name] = previous;
+    });
+  }
+  const loader = new DefaultResourceLoader({
+    cwd: directory,
+    agentDir: directory,
+    noExtensions: true,
+    noSkills: true,
+    noContextFiles: true,
+    extensionFactories: [extension],
+  });
+  await loader.reload();
+  const loaded = loader.getExtensions();
+  assert.deepEqual(loaded.errors, []);
+  const waiting = Promise.withResolvers<void>();
+  const status: unknown[][] = [];
+  const notices: string[] = [];
+  const ctx = {
+    mode: "rpc",
+    ui: {
+      setStatus(...update: unknown[]) {
+        status.push(update);
+        waiting.resolve();
+      },
+      notify: (text: string) => notices.push(text),
+    },
+  };
+  for (const handler of loaded.extensions[0].handlers.get("session_start") ?? [])
+    await handler({ type: "session_start" }, ctx);
+  // A frozen clock keeps the countdown at the full delay.
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2030-01-01T00:00:00Z") });
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const result = loaded.runtime.pendingNativeProviderRegistrations[0].provider
+    .streamSimple(
+      mapCatalog(catalog, parseConfig({ baseUrl }), known).models[1],
+      normalizeContext({ messages: [{ role: "user", content: "Return ok.", timestamp: 0 }] }),
+      { apiKey: key, maxRetries: 0, signal: controller.signal },
+    )
+    .result();
+  await waiting.promise;
+  assert.deepEqual(status, [["cliproxyapi-quota", "CLIProxyAPI quota: retry in 0h 53m 1s"]]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /^CLIProxyAPI quota limit\. Retrying at .+\. Cancel the current request to stop/);
+  controller.abort();
+  assert.equal((await result).stopReason, "aborted");
+  assert.deepEqual(status.at(-1), ["cliproxyapi-quota", undefined]);
 });
 
 test("repeated header cooldowns cannot extend the original weekly waiting deadline", {

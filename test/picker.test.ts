@@ -428,6 +428,9 @@ test("media selection uses only GETs, restores branch defaults, and never change
   }
   await command.handler("clear image", ctx);
   assert.deepEqual(readMediaDefaults(config, ctx), { video });
+  // Each failure reports its own reason.
+  await command.handler("clear both", ctx);
+  assert.equal(notifications.at(-1), "Usage: /cli:model clear image|video");
   sessionManager.branch(imageLeaf);
   await command.handler("list", ctx);
   assert.match(notifications.at(-1) ?? "", /Image: gemini-3.1-flash-image.*Video: none/);
@@ -557,11 +560,14 @@ test("picker saves follow successful command order per purpose across deferred d
       if (!immediate)
         gates[1].response.resolve(scenario.failure ? new Response("failed", { status: 503 }) : response());
       await later;
+      if (scenario.failure) assert.equal(notifications.at(-1), "CLIProxyAPI discovery failed (HTTP 503).");
       if (!scenario.olderFirst) {
         if (scenario.abort) controller.abort();
         gates[0].response.resolve(response());
         await older;
       }
+      if (scenario.abort)
+        assert.equal(notifications.at(-1), "CLIProxyAPI model selection was cancelled or timed out.");
       assert.deepEqual(readMediaDefaults(config, ctx), scenario.expected);
       assert.equal(
         notifications.some((text) => text.includes("superseded")),

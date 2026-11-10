@@ -2,6 +2,14 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.8] - 2026-11-10
+
+- Model discovery skips an ID it cannot use and keeps the rest of the catalog. CLIProxyAPI accepts any text as a model alias, and one ID with a space, a non-ASCII character, or more than 256 characters made discovery fail. A catalog with no usable ID still fails, so it cannot replace a working model list.
+- `cliproxyapi_generate_image` creates its output directory before the request. If `.pi/` cannot be created, the call fails before anything is generated. Before, the extension generated the image and then discarded it.
+- Image edits reject `data:` URLs and paths over 4096 characters as image data. Before, the file error repeated the whole value.
+- Live Claude quota lookups run less often while the reset is far away. The interval grows with the remaining wait, up to ten minutes. Within 20 minutes of the reset they run every minute, as before.
+- `/cli:model` reports the reason for a failure, such as the HTTP status or a rejected login. Before, most failures showed one generic message.
+
 ## [0.3.7] - 2026-11-10
 
 - Model discovery accepts catalogs where a provider's name is empty or contains spaces. CLIProxyAPI reports the configured name of an OpenAI-compatible provider as `owned_by`, and one such entry made login, `/cliproxyapi-refresh`, `/cli:model`, and the media tools fail.

@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, rmdir, writeFile } from "node:fs/promises";
 import * as http from "node:http";
 import * as https from "node:https";
 import { join, resolve } from "node:path";
@@ -315,15 +315,19 @@ async function imageInputs(
   let total = 0;
   for (const [index, path] of [...params.images, ...(layer === undefined ? [] : [layer])].entries()) {
     signal.throwIfAborted();
+    const location = typeof path === "string" ? resolve(cwd, path) : "";
     if (
-      typeof path !== "string" ||
+      !location ||
       !path.trim() ||
       path.includes("\0") ||
-      /^[a-z][a-z\d+.-]*:\/\//i.test(path)
+      // No file system takes a longer path, so a longer value is image data.
+      location.length > 4096 ||
+      // A data URL has a comma after its media type; a file name that starts with "data:" need not.
+      /^(?:data:[^,]*,|[a-z][a-z\d+.-]*:\/\/)/i.test(path)
     )
-      throw new Error("CLIProxyAPI editing accepts local image paths, not URLs.");
+      throw new Error("CLIProxyAPI editing accepts local image paths, not URLs or image data.");
     // Nonblocking open prevents FIFOs from hanging before the regular-file check.
-    const file = await open(resolve(cwd, path), constants.O_RDONLY | constants.O_NONBLOCK);
+    const file = await open(location, constants.O_RDONLY | constants.O_NONBLOCK);
     let bytes: Buffer;
     try {
       const info = await file.stat();
@@ -529,7 +533,7 @@ function errorText(value: unknown, key: string) {
 }
 
 // Server-sent events: partial previews go to the callback, other events are returned in order.
-async function readEvents(
+export async function readEvents(
   reader: StreamReader,
   maxBytes: number,
   onPartial: (event: Record<string, unknown>) => void,
@@ -1083,56 +1087,71 @@ export async function generateImage(
   const inputs = await imageInputs(model, params, ctx.cwd, bounded);
   const key = await generationKey(config, { ...params, model }, ctx, bounded);
   bounded.throwIfAborted();
-  onProgress?.(inputs.images ? "Editing image..." : "Generating image...");
-  bounded.throwIfAborted();
-  const { images, usage } = await requestImages(
-    config,
-    key,
-    model,
-    { prompt: params.prompt, output, ...inputs },
-    bounded,
-    onPartial,
-  );
-  bounded.throwIfAborted();
-  onProgress?.("Saving image...");
-  bounded.throwIfAborted();
+  // A generated image cannot be regenerated for free, so its directory exists before the request.
   const artifacts = join(ctx.cwd, ".pi");
-  await mkdir(artifacts, { recursive: true, mode: 0o700 });
-  const directory = await mkdtemp(join(artifacts, "cliproxyapi-image-"));
-  const files = images.map(({ extension, image }, index) => ({
-    path: join(directory, `${index === 0 ? "image" : `image-${index + 1}`}.${extension}`),
-    mimeType: image.mimeType,
-  }));
+  let created: string | undefined;
+  let directory = "";
   try {
-    for (const [index, { bytes }] of images.entries()) {
-      await writeFile(files[index].path, bytes, { flag: "wx", mode: 0o600, signal: bounded });
+    try {
+      created = await mkdir(artifacts, { recursive: true, mode: 0o700 });
+      directory = await mkdtemp(join(artifacts, "cliproxyapi-image-"));
+    } catch {
+      throw new Error(
+        "CLIProxyAPI cannot create .pi/ in the working directory to save images. Nothing was generated.",
+      );
     }
+    onProgress?.(inputs.images ? "Editing image..." : "Generating image...");
     bounded.throwIfAborted();
-  } catch {
-    await rm(directory, { recursive: true, force: true });
-    throw new Error("CLIProxyAPI generated images but could not save the artifacts.");
-  }
-  let previewBudget = MAX_INLINE_IMAGE_BASE64_BYTES;
-  const content: (TextContent | ImageContent)[] = [];
-  for (const [index, { image }] of images.entries()) {
-    // Chat providers disagree on animated GIF input and reject SVG, so both skip inline previews.
-    const previewOmitted = ["image/gif", "image/svg+xml"].includes(image.mimeType)
-      ? "Preview omitted: GIF and SVG results are saved without an inline preview."
-      : !ctx.model?.input.includes("image")
-        ? "Preview omitted: the current chat model does not support images."
-        : image.data.length > previewBudget
-          ? "Preview omitted: image base64 exceeds the 4 MiB inline budget. Use read on the saved file."
-          : undefined;
-    content.push({
-      type: "text",
-      text: `Saved image: ${files[index].path}${previewOmitted ? `\n${previewOmitted}` : ""}`,
-    });
-    if (!previewOmitted) {
-      content.push(image);
-      previewBudget -= image.data.length;
+    const { images, usage } = await requestImages(
+      config,
+      key,
+      model,
+      { prompt: params.prompt, output, ...inputs },
+      bounded,
+      onPartial,
+    );
+    bounded.throwIfAborted();
+    onProgress?.("Saving image...");
+    bounded.throwIfAborted();
+    const files = images.map(({ extension, image }, index) => ({
+      path: join(directory, `${index === 0 ? "image" : `image-${index + 1}`}.${extension}`),
+      mimeType: image.mimeType,
+    }));
+    try {
+      for (const [index, { bytes }] of images.entries()) {
+        await writeFile(files[index].path, bytes, { flag: "wx", mode: 0o600, signal: bounded });
+      }
+      bounded.throwIfAborted();
+    } catch {
+      throw new Error("CLIProxyAPI generated images but could not save the artifacts.");
     }
+    let previewBudget = MAX_INLINE_IMAGE_BASE64_BYTES;
+    const content: (TextContent | ImageContent)[] = [];
+    for (const [index, { image }] of images.entries()) {
+      // Chat providers disagree on animated GIF input and reject SVG, so both skip inline previews.
+      const previewOmitted = ["image/gif", "image/svg+xml"].includes(image.mimeType)
+        ? "Preview omitted: GIF and SVG results are saved without an inline preview."
+        : !ctx.model?.input.includes("image")
+          ? "Preview omitted: the current chat model does not support images."
+          : image.data.length > previewBudget
+            ? "Preview omitted: image base64 exceeds the 4 MiB inline budget. Use read on the saved file."
+            : undefined;
+      content.push({
+        type: "text",
+        text: `Saved image: ${files[index].path}${previewOmitted ? `\n${previewOmitted}` : ""}`,
+      });
+      if (!previewOmitted) {
+        content.push(image);
+        previewBudget -= image.data.length;
+      }
+    }
+    return { content, details: { model, files }, usage };
+  } catch (error) {
+    // A failed call leaves no files, and no .pi/ that it created.
+    if (directory) await rm(directory, { recursive: true, force: true }).catch(() => {});
+    if (created) await rmdir(artifacts).catch(() => {});
+    throw error;
   }
-  return { content, details: { model, files }, usage };
 }
 
 function requestId(value: unknown) {

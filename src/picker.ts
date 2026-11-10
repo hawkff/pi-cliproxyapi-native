@@ -316,9 +316,12 @@ export function registerModelPicker(pi: ExtensionAPI, config: Config) {
         if (!clearedPurpose(choice) && !rows.find((row) => row.id === choice)?.supported)
           throw new Error("Model unavailable or unsupported. Use /cli:model to list supported IDs.");
         save(choice);
-      } catch {
+      } catch (error) {
+        // Each failure explains itself. A cancelled or timed-out request carries only its signal's reason.
         report(
-          "CLIProxyAPI model selection failed: unavailable/unsupported model, invalid command, authentication, or connection error. Check /login cliproxyapi. Use /cli:model list, select <exact ID>, or clear image|video.",
+          error instanceof Error && error.name !== "AbortError" && error.name !== "TimeoutError"
+            ? error.message
+            : "CLIProxyAPI model selection was cancelled or timed out.",
           true,
         );
       }
