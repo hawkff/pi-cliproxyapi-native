@@ -37,10 +37,10 @@ The extension targets Pi 1.5.2 and CLIProxyAPI 8.0.64, with Node.js 22.19 or new
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.7
+pi install npm:pi-cliproxyapi-native@0.3.8
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.7`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.8`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -174,7 +174,7 @@ Use `cliproxyapi_media_models` to inspect controls for the exact advertised mode
 | `markup`             | Optional local PNG annotation layer for GPT Image 2.5 and 2.6 Sunburst and Flare. It needs an alpha channel, the first image's dimensions, and transparency outside the marks. It cannot be combined with `mask`.                |
 | `input_fidelity`     | `low` or `high`, for GPT Image 1.5 editing only. Omit it for other models.                                                                                                                                                       |
 
-Editing uploads the files you name to the configured proxy. Paths can be absolute or relative to the working directory. The extension accepts regular files, checks file signatures, and limits uploads to 14 MiB per file and 20 MiB total including the mask or markup layer. It compares markup dimensions only with a PNG first image; OpenAI checks JPEG and WebP inputs. It does not fetch input URLs, resize inputs, or modify source files. OpenAI performs full image decoding and validates the edit. These local limits keep base64 uploads bounded and may be lower than upstream limits.
+Editing uploads the files you name to the configured proxy. Paths can be absolute or relative to the working directory. The extension accepts regular files, checks file signatures, and limits uploads to 14 MiB per file and 20 MiB total including the mask or markup layer. It compares markup dimensions only with a PNG first image; OpenAI checks JPEG and WebP inputs. It rejects URLs and inline image data such as `data:` URLs. It does not resize inputs or modify source files. OpenAI performs full image decoding and validates the edit. These local limits keep base64 uploads bounded and may be lower than upstream limits.
 
 ```text
 Generate two images with api/gpt-image-2.6-sunburst at 1536x864, quality max, output_format webp, output_compression 85.
@@ -226,7 +226,7 @@ The picker explains their retirement, and generation rejects them before network
 
 ### Files, status, and limits
 
-Image generation saves JPEG, PNG, WebP, GIF, or SVG files under a new `.pi/cliproxyapi-image-*/` directory in your working directory. The extension checks base64 and file signatures, uses private permissions, and does not overwrite existing files. Keep `.pi/` out of version control.
+Image generation saves JPEG, PNG, WebP, GIF, or SVG files under a new `.pi/cliproxyapi-image-*/` directory in your working directory. The extension creates that directory before it sends the request. If it cannot, the call fails and nothing is generated. A failed generation removes the directory again. The extension checks base64 and file signatures, uses private permissions, and does not overwrite existing files. Keep `.pi/` out of version control.
 
 Inline previews require a vision-capable chat model and share a 4 MiB base64 budget per result. Larger images return file paths without previews, and GIF and SVG results never include one. Use Pi's `read` tool to inspect saved images. URL-only image responses fail without a download.
 
@@ -260,7 +260,7 @@ Run `/cliproxyapi-refresh` to update the chat and image catalogs. It reports bot
 
 Set `CLIPROXYAPI_MANAGEMENT_KEY` in Pi's environment to enable live Claude quota lookup. With live lookup enabled, Claude subscription requests enter quota handling on the first quota rejection, before SDK or Pi retries. The extension asks CLIProxyAPI to fetch Claude's OAuth usage, using the same upstream endpoint as the management dashboard. It reads absolute `resets_at` timestamps.
 
-The extension refreshes usage every minute while waiting and at the reported reset, with a one-second buffer. It checks the five-hour allowance and applicable weekly limits, including model-specific limits. A request that would exceed the remaining account allowance can wait for the five-hour reset before utilization reaches 100%. For an account pool, it considers enabled Claude subscription accounts that advertise the selected model and uses the earliest eligible recovery. The terminal countdown follows updated reset times. Cancel the current request to stop waiting; closing or reloading Pi discards the wait.
+While waiting, the extension refreshes usage every minute within 20 minutes of the reset. Before that the interval grows with the remaining wait, up to ten minutes. It refreshes again at the reported reset, with a one-second buffer. Each refresh checks the five-hour allowance and applicable weekly limits, including model-specific limits. A request that would exceed the remaining account allowance can wait for the five-hour reset before utilization reaches 100%. For an account pool, it considers enabled Claude subscription accounts that advertise the selected model and uses the earliest eligible recovery. The terminal countdown follows updated reset times. Cancel the current request to stop waiting; closing or reloading Pi discards the wait.
 
 Weekly exhaustion stops the request by default and reports the reset time. To wait for weekly resets too, merge this setting into `~/.pi/agent/pi-cliproxyapi.json`, then run `/reload`:
 
@@ -312,7 +312,7 @@ Authentication failures, exhausted quotas, and inputs that exceed the model's co
 
 ### Aliases and model limits
 
-The chat catalog skips unknown IDs rather than guessing their capabilities. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out. For example, CLIProxyAPI 8.0.64 lists `gpt-6-chat-thinking` and `gemini-omni-1.2-flash`, which have no metadata in Pi 1.5.2, so `/cliproxyapi-refresh` reports them as not registered until you add an alias. Pi 1.5.2 includes `claude-fable-5-2`, which registers without one.
+The chat catalog skips unknown IDs rather than guessing their capabilities. Discovery also skips IDs it cannot send or display safely: empty IDs, IDs over 256 characters, and IDs with spaces or non-ASCII characters. A catalog with no usable ID fails as invalid and leaves the current model list in place. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out. For example, CLIProxyAPI 8.0.64 lists `gpt-6-chat-thinking` and `gemini-omni-1.2-flash`, which have no metadata in Pi 1.5.2, so `/cliproxyapi-refresh` reports them as not registered until you add an alias. Pi 1.5.2 includes `claude-fable-5-2`, which registers without one.
 
 To describe a proxy alias, add a canonical metadata reference to `~/.pi/agent/pi-cliproxyapi.json`:
 
