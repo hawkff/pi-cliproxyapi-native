@@ -312,6 +312,8 @@ const metadataFallbacks = new Map([
   ["claude-opus-5-5-high", "anthropic/claude-opus-5-5"],
   ["claude-sonnet-5-5-high", "anthropic/claude-sonnet-5-5"],
   ["gemini-4-argon-high", "google/gemini-4-argon"],
+  ["gemini-4-carbon-high", "google/gemini-4-carbon"],
+  ["gemini-3.8-flash-high", "google/gemini-3.8-flash"],
 ]);
 
 export function mapCatalog(value: unknown, config: Config, known: readonly Model<Api>[]) {

@@ -226,11 +226,19 @@ test("auth prefixes keep separate entries and reuse metadata without guessing cu
 });
 
 test("Antigravity high IDs use exact metadata fallbacks without changing advertised IDs", () => {
-  const sources = builtinCatalog();
+  const bundled = builtinCatalog();
+  const argon = bundled.find((model) => model.provider === "google" && model.id === "gemini-4-argon");
+  assert.ok(argon);
+  // Pi 1.5.2 gets Gemini 4 Carbon metadata only from its pi.dev catalog.
+  const sources = metadataCatalog((provider) =>
+    provider === "google" ? [{ ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" }] : undefined,
+  );
   for (const [provider, canonical] of [
     ["anthropic", "claude-opus-5-5"],
     ["anthropic", "claude-sonnet-5-5"],
     ["google", "gemini-4-argon"],
+    ["google", "gemini-4-carbon"],
+    ["google", "gemini-3.8-flash"],
   ]) {
     const reference = sources.find((model) => model.provider === provider && model.id === canonical);
     assert.ok(reference);

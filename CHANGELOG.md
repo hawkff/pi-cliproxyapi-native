@@ -2,6 +2,11 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.9] - 2026-11-11
+
+- Antigravity's `gemini-4-carbon-high` and `gemini-3.8-flash-high` register with `google/gemini-4-carbon` and `google/gemini-3.8-flash` metadata, as `gemini-4-argon-high` does with `google/gemini-4-argon`. Before, discovery skipped both IDs. Pi 1.5.2 doesn't bundle Gemini 4 Carbon metadata. Until a Pi release does, `gemini-4-carbon-high` needs the metadata from Pi's pi.dev catalog, which Pi downloads only while Google has credentials in Pi, such as a stored login or `GEMINI_API_KEY`.
+- The extension targets Pi 1.5.2 and CLIProxyAPI 8.0.67.
+
 ## [0.3.8] - 2026-11-10
 
 - Model discovery skips an ID it cannot use and keeps the rest of the catalog. CLIProxyAPI accepts any text as a model alias, and one ID with a space, a non-ASCII character, or more than 256 characters made discovery fail. A catalog with no usable ID still fails, so it cannot replace a working model list.
