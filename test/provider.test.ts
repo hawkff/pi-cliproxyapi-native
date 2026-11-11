@@ -229,7 +229,7 @@ test("Antigravity high IDs use exact metadata fallbacks without changing adverti
   const bundled = builtinCatalog();
   const argon = bundled.find((model) => model.provider === "google" && model.id === "gemini-4-argon");
   assert.ok(argon);
-  // Pi 1.5.2 has Gemini 4 Carbon metadata only in its refreshed catalog.
+  // Pi 1.5.2 loads Gemini 4 Carbon metadata only from pi.dev, for a Google provider with credentials.
   const sources = metadataCatalog((provider) =>
     provider === "google" ? [{ ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" }] : undefined,
   );
