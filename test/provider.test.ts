@@ -225,24 +225,31 @@ test("auth prefixes keep separate entries and reuse metadata without guessing cu
   );
 });
 
-test("Antigravity high IDs use exact metadata fallbacks without changing advertised IDs", () => {
+test("Antigravity tier IDs use exact metadata fallbacks without changing advertised IDs", () => {
   const bundled = builtinCatalog();
   const argon = bundled.find((model) => model.provider === "google" && model.id === "gemini-4-argon");
   assert.ok(argon);
-  // Pi 1.5.2 gets Gemini 4 Carbon metadata only from its pi.dev catalog.
+  // Pi 1.5.2 gets Gemini 4 Carbon and Hydrogen metadata only from its pi.dev catalog.
   const sources = metadataCatalog((provider) =>
-    provider === "google" ? [{ ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" }] : undefined,
+    provider === "google"
+      ? [
+          { ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+          { ...argon, id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+        ]
+      : undefined,
   );
-  for (const [provider, canonical] of [
-    ["anthropic", "claude-opus-5-5"],
-    ["anthropic", "claude-sonnet-5-5"],
-    ["google", "gemini-4-argon"],
-    ["google", "gemini-4-carbon"],
-    ["google", "gemini-3.8-flash"],
+  for (const [provider, canonical, tier] of [
+    ["anthropic", "claude-opus-5-5", "high"],
+    ["anthropic", "claude-sonnet-5-5", "high"],
+    ["google", "gemini-4-argon", "high"],
+    ["google", "gemini-4-carbon", "high"],
+    ["google", "gemini-4-hydrogen", "xhigh"],
+    ["google", "gemini-3.8-flash", "high"],
+    ["google", "gemini-3.8-flash", "tiered"],
   ]) {
     const reference = sources.find((model) => model.provider === provider && model.id === canonical);
     assert.ok(reference);
-    const bare = `${canonical}-high`;
+    const bare = `${canonical}-${tier}`;
     for (const id of [
       bare,
       ...["antigravity", "vertex", "api", "oauth"].map((prefix) => `${prefix}/${bare}`),

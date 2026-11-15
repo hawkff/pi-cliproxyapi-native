@@ -2,6 +2,11 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.10] - 2026-11-15
+
+- Antigravity's `gemini-4-hydrogen-xhigh` registers with `google/gemini-4-hydrogen` metadata, and `gemini-3.8-flash-tiered` with `google/gemini-3.8-flash` metadata. CLIProxyAPI 8.0.68 added both IDs, and discovery skipped them. Pi 1.5.2 doesn't bundle Gemini 4 Hydrogen metadata, so `gemini-4-hydrogen` and `gemini-4-hydrogen-xhigh` need Pi's pi.dev catalog, as Gemini 4 Carbon does.
+- The extension targets Pi 1.5.2 and CLIProxyAPI 8.0.72.
+
 ## [0.3.9] - 2026-11-11
 
 - Antigravity's `gemini-4-carbon-high` and `gemini-3.8-flash-high` register with `google/gemini-4-carbon` and `google/gemini-3.8-flash` metadata, as `gemini-4-argon-high` does with `google/gemini-4-argon`. Before, discovery skipped both IDs. Pi 1.5.2 doesn't bundle Gemini 4 Carbon metadata. Until a Pi release does, `gemini-4-carbon-high` needs the metadata from Pi's pi.dev catalog, which Pi downloads only while Google has credentials in Pi, such as a stored login or `GEMINI_API_KEY`.
