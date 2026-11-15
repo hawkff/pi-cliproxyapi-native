@@ -37,10 +37,10 @@ The extension targets Pi 1.5.2 and CLIProxyAPI 8.0.72, with Node.js 22.19 or new
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.9
+pi install npm:pi-cliproxyapi-native@0.3.10
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.9`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.10`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
