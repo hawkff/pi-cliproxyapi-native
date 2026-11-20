@@ -229,12 +229,13 @@ test("Antigravity tier IDs use exact metadata fallbacks without changing adverti
   const bundled = builtinCatalog();
   const argon = bundled.find((model) => model.provider === "google" && model.id === "gemini-4-argon");
   assert.ok(argon);
-  // Pi 1.5.2 gets Gemini 4 Carbon and Hydrogen metadata only from its pi.dev catalog.
+  // Pi 1.5.2 gets Gemini 4 Carbon, Hydrogen, and Neon metadata only from its pi.dev catalog.
   const sources = metadataCatalog((provider) =>
     provider === "google"
       ? [
           { ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" },
           { ...argon, id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+          { ...argon, id: "gemini-4-neon", name: "Gemini 4 Neon" },
         ]
       : undefined,
   );
@@ -244,6 +245,7 @@ test("Antigravity tier IDs use exact metadata fallbacks without changing adverti
     ["google", "gemini-4-argon", "high"],
     ["google", "gemini-4-carbon", "high"],
     ["google", "gemini-4-hydrogen", "xhigh"],
+    ["google", "gemini-4-neon", "xhigh"],
     ["google", "gemini-3.8-flash", "high"],
     ["google", "gemini-3.8-flash", "tiered"],
   ]) {

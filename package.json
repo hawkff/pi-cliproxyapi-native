@@ -1,6 +1,6 @@
 {
   "name": "pi-cliproxyapi-native",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "CLIProxyAPI chat discovery, image generation and editing, and video generation with Pi's native adapters",
   "publishConfig": {
     "access": "public"
@@ -39,7 +39,7 @@
     "check": "pnpm typecheck && pnpm lint && pnpm test"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.6",
+    "@biomejs/biome": "^2.6.8",
     "@earendil-works/pi-ai": "^1.5.2",
     "@earendil-works/pi-coding-agent": "^1.5.2",
     "@earendil-works/pi-tui": "^1.5.2",
