@@ -314,6 +314,7 @@ const metadataFallbacks = new Map([
   ["gemini-4-argon-high", "google/gemini-4-argon"],
   ["gemini-4-carbon-high", "google/gemini-4-carbon"],
   ["gemini-4-hydrogen-xhigh", "google/gemini-4-hydrogen"],
+  ["gemini-4-neon-xhigh", "google/gemini-4-neon"],
   ["gemini-3.8-flash-high", "google/gemini-3.8-flash"],
   ["gemini-3.8-flash-tiered", "google/gemini-3.8-flash"],
 ]);
