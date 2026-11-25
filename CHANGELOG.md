@@ -2,6 +2,13 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.12] - 2026-11-26
+
+- Copilot models from CLIProxyAPI 8.1's GitHub Copilot provider register with Pi's `github-copilot` metadata, so they get Copilot's context and output limits. Before, discovery skipped Copilot-only IDs such as `claude-sonnet-5.5`, `kimi-k3`, and `mai-code-2`, and gave shared IDs such as `gpt-6.2-sol` the OpenAI limits. Other owners never resolve to Copilot metadata, so Antigravity's `gemini-4-argon` keeps its Google metadata.
+- Copilot's Claude models keep Pi's five-minute cache refreshes. The one-hour cache lifetime applies only to CLIProxyAPI's own Claude routes.
+- Pi 1.6.1 bundles Gemini 4 Carbon, Hydrogen, and Neon metadata, so their Antigravity IDs no longer need Pi's pi.dev catalog.
+- The extension targets Pi 1.6.1 and CLIProxyAPI 8.1.4.
+
 ## [0.3.11] - 2026-11-20
 
 - Antigravity's `gemini-4-neon-xhigh` registers with `google/gemini-4-neon` metadata. CLIProxyAPI 8.0.78 added the ID, and discovery skipped it. Pi 1.5.2 doesn't bundle Gemini 4 Neon metadata, so the ID needs Pi's pi.dev catalog, as Gemini 4 Carbon and Hydrogen do.

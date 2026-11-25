@@ -39,6 +39,7 @@ export function builtinCatalog() {
     ...getBuiltinModels("openai-codex"),
     ...getBuiltinModels("google"),
     ...getBuiltinModels("xai"),
+    ...getBuiltinModels("github-copilot"),
   ];
 }
 
@@ -49,7 +50,7 @@ export function metadataCatalog(live?: (provider: string) => readonly Model<Api>
   const ids = new Set(bundled.map(({ provider, id }) => `${provider}/${id}`));
   return [
     ...bundled,
-    ...["anthropic", "openai", "openai-codex", "google", "xai"]
+    ...["anthropic", "openai", "openai-codex", "google", "xai", "github-copilot"]
       .flatMap((provider) => live(provider) ?? [])
       .filter(({ provider, id }) => !ids.has(`${provider}/${id}`)),
   ];
@@ -321,7 +322,7 @@ export function createCliproxyProvider(
   let skipped: string[] = [];
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
-    .update(JSON.stringify([6, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+    .update(JSON.stringify([7, { baseUrl: config.baseUrl, aliases: config.aliases }]))
     .digest("hex");
   const provider = createProvider<CpaApi>({
     id: PROVIDER_ID,

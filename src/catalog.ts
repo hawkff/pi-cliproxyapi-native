@@ -305,6 +305,7 @@ const owners: Readonly<Record<string, string>> = {
   gemini: "google",
   "gemini-cli": "google",
   xai: "xai",
+  copilot: "github-copilot",
 };
 
 // Built-in aliases for advertised IDs without native metadata; exact metadata still wins.
@@ -331,11 +332,18 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
     const alias =
       configuredAlias(config, entry.id) ??
       (routed && !byId.has(metadataId) ? metadataFallbacks.get(metadataId) : undefined);
-    const candidates = (alias ? byReference.get(alias) : routed ? byId.get(metadataId) : undefined) ?? [];
+    const preferred = entry.owner ? owners[entry.owner.toLowerCase()] : undefined;
+    const matches = (alias ? byReference.get(alias) : routed ? byId.get(metadataId) : undefined) ?? [];
+    // Copilot metadata carries Copilot's own IDs and limits. It serves only Copilot-owned entries, so
+    // IDs Copilot shares with a native family stay unambiguous for other owners, such as Antigravity.
+    const copilot =
+      preferred === "github-copilot" && matches.some((model) => model.provider === "github-copilot");
+    const candidates = alias
+      ? matches
+      : matches.filter((model) => (model.provider === "github-copilot") === copilot);
     const families = new Set(
       candidates.map((model) => (model.provider === "openai-codex" ? "openai" : model.provider)),
     );
-    const preferred = entry.owner ? owners[entry.owner.toLowerCase()] : undefined;
     const reference = alias
       ? candidates.length === 1
         ? candidates[0]
@@ -369,8 +377,8 @@ export function mapCatalog(value: unknown, config: Config, known: readonly Model
       api,
       baseUrl: endpoint(config.baseUrl, api),
       headers: undefined,
-      // CLIProxyAPI gives OAuth Claude caches a one-hour TTL. Only api/ routes keep Pi's five-minute refreshes.
-      ...(api === "anthropic-messages" && prefix !== "api"
+      // CLIProxyAPI gives OAuth Claude caches a one-hour TTL. api/ and Copilot keep Pi's five-minute refreshes.
+      ...(api === "anthropic-messages" && prefix !== "api" && preferred !== "github-copilot"
         ? { promptCache: { short: 3600, long: 3600 } }
         : {}),
       compat:
