@@ -2451,10 +2451,11 @@ test("previous-policy caches cannot restore GPT-image chat aliases", async (t) =
   }
 });
 
-test("previous cache-policy catalogs cannot restore five-minute Claude refreshes or message threads", async (t) => {
+test("catalogs saved under an older metadata policy cannot be restored offline", async (t) => {
   t.mock.method(globalThis, "fetch", () => assert.fail("Offline restoration must not contact the proxy"));
   const config = parseConfig({});
-  for (const version of [5, 6]) {
+  // 6 restored Copilot-owned IDs with native limits; 5 restored five-minute Claude refreshes.
+  for (const version of [5, 6, 7]) {
     const provider = createCliproxyProvider(config, known);
     await provider.refreshModels({
       allowNetwork: false,
@@ -2473,7 +2474,7 @@ test("previous cache-policy catalogs cannot restore five-minute Claude refreshes
       },
     });
     // The current policy restores the same entry, so only the version blocks the older cache.
-    assert.equal(provider.getModels().length, version === 6 ? 1 : 0);
+    assert.equal(provider.getModels().length, version === 7 ? 1 : 0);
   }
 });
 

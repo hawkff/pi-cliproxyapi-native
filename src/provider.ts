@@ -322,7 +322,7 @@ export function createCliproxyProvider(
   let skipped: string[] = [];
   const standardAuth = envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXYAPI_API_KEY"]);
   const scope = createHash("sha256")
-    .update(JSON.stringify([6, { baseUrl: config.baseUrl, aliases: config.aliases }]))
+    .update(JSON.stringify([7, { baseUrl: config.baseUrl, aliases: config.aliases }]))
     .digest("hex");
   const provider = createProvider<CpaApi>({
     id: PROVIDER_ID,
