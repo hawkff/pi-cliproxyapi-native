@@ -159,7 +159,9 @@ test("mapping keeps native metadata and routes every supported family to the pro
     if (hasApi(model, "google-generative-ai")) continue;
     const compat = model.compat;
     const midConvo =
-      compat && "supportsMidConvoSystemMessages" in compat ? compat.supportsMidConvoSystemMessages : undefined;
+      compat && "supportsMidConvoSystemMessages" in compat
+        ? compat.supportsMidConvoSystemMessages
+        : undefined;
     // OpenAI-owned Responses routes keep Pi's transcript capabilities; other families stay conservative.
     assert.equal(midConvo, hasApi(model, "openai-responses"));
     if (hasApi(model, "openai-completions")) assert.equal(model.compat?.supportsMidConvoToolAdditions, false);
