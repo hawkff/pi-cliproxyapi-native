@@ -39,6 +39,7 @@ export function builtinCatalog() {
     ...getBuiltinModels("openai-codex"),
     ...getBuiltinModels("google"),
     ...getBuiltinModels("xai"),
+    ...getBuiltinModels("github-copilot"),
   ];
 }
 
@@ -49,7 +50,7 @@ export function metadataCatalog(live?: (provider: string) => readonly Model<Api>
   const ids = new Set(bundled.map(({ provider, id }) => `${provider}/${id}`));
   return [
     ...bundled,
-    ...["anthropic", "openai", "openai-codex", "google", "xai"]
+    ...["anthropic", "openai", "openai-codex", "google", "xai", "github-copilot"]
       .flatMap((provider) => live(provider) ?? [])
       .filter(({ provider, id }) => !ids.has(`${provider}/${id}`)),
   ];

@@ -26,7 +26,7 @@ import {
 import { DefaultResourceLoader, ModelRuntime, resolveCliModel } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import extension from "../extensions/index.ts";
-import { IMAGE_API, mapCatalog, parseCatalog, routedName } from "../src/catalog.ts";
+import { IMAGE_API, mapCatalog, modelRoute, parseCatalog, routedName } from "../src/catalog.ts";
 import { claudeQuotaState, fetchClaudeQuota, waitForClaudeQuota } from "../src/claude-quota.ts";
 import { isRecord, normalizeBaseUrl, PROVIDER_ID, parseConfig } from "../src/config.ts";
 import {
@@ -226,19 +226,7 @@ test("auth prefixes keep separate entries and reuse metadata without guessing cu
 });
 
 test("Antigravity tier IDs use exact metadata fallbacks without changing advertised IDs", () => {
-  const bundled = builtinCatalog();
-  const argon = bundled.find((model) => model.provider === "google" && model.id === "gemini-4-argon");
-  assert.ok(argon);
-  // Pi 1.5.2 gets Gemini 4 Carbon, Hydrogen, and Neon metadata only from its pi.dev catalog.
-  const sources = metadataCatalog((provider) =>
-    provider === "google"
-      ? [
-          { ...argon, id: "gemini-4-carbon", name: "Gemini 4 Carbon" },
-          { ...argon, id: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
-          { ...argon, id: "gemini-4-neon", name: "Gemini 4 Neon" },
-        ]
-      : undefined,
-  );
+  const sources = builtinCatalog();
   for (const [provider, canonical, tier] of [
     ["anthropic", "claude-opus-5-5", "high"],
     ["anthropic", "claude-sonnet-5-5", "high"],
@@ -291,6 +279,49 @@ test("Antigravity tier IDs use exact metadata fallbacks without changing adverti
       assert.deepEqual(mapCatalog({ data: [{ id }] }, parseConfig({}), sources).skipped, [id]);
     }
   }
+});
+
+test("Copilot-owned IDs use Copilot metadata, and other owners keep native metadata", () => {
+  const sources = builtinCatalog();
+  const data = [
+    { id: "claude-sonnet-5.5", owned_by: "copilot" },
+    { id: "kimi-k3", owned_by: "copilot" },
+    { id: "gpt-6.2-sol", owned_by: "copilot" },
+    { id: "gemini-4-argon", owned_by: "antigravity" },
+    { id: "antigravity/gemini-4-argon", owned_by: "antigravity" },
+    { id: "claude-opus-5.5", owned_by: "antigravity" },
+  ];
+  const mapped = mapCatalog({ data }, parseConfig({}), sources);
+  assert.deepEqual(mapped.skipped, ["claude-opus-5.5"]);
+  assert.equal(mapped.models.length, 5);
+  for (const model of mapped.models) {
+    const owner = data.find(({ id }) => id === model.id)?.owned_by;
+    const reference = sources.find(
+      (source) =>
+        source.provider === (owner === "copilot" ? "github-copilot" : "google") &&
+        source.id === modelRoute(model.id).metadataId,
+    );
+    assert.ok(reference, model.id);
+    assert.equal(model.provider, PROVIDER_ID);
+    assert.equal(model.api, reference.api);
+    assert.equal(model.contextWindow, reference.contextWindow);
+    assert.equal(model.maxTokens, reference.maxTokens);
+    // Copilot's editor headers belong to Copilot, not to the proxy.
+    assert.equal(model.headers, undefined);
+    assert.deepEqual(model.promptCache, reference.promptCache);
+  }
+  const claude = mapped.models[0];
+  assert.ok(hasApi(claude, "anthropic-messages"));
+  assert.equal(claude.compat?.supportsStrictTools, false);
+  // A Copilot-owned alias to native Claude metadata keeps Pi's cache refreshes too.
+  const native = sources.find((model) => model.provider === "anthropic");
+  assert.ok(native);
+  const aliased = mapCatalog(
+    { data: [{ id: "team-claude", owned_by: "copilot" }] },
+    parseConfig({ aliases: { "team-claude": `anthropic/${native.id}` } }),
+    sources,
+  ).models[0];
+  assert.deepEqual(aliased.promptCache, native.promptCache);
 });
 
 test("Claude routes keep message threads off and report one-hour caches except on API keys", () => {
