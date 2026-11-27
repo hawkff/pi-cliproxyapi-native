@@ -912,16 +912,12 @@ async function requestImages(
   const { partial_images = 0, ...output } = request.output;
   const n = output.n ?? 1;
   const stream = route === "openai" && partial_images > 0;
+  // Omitted keys, not undefined ones, so a payload hook's defaults placed before a spread survive.
+  const resolution = output.resolution === undefined ? {} : { resolution: output.resolution };
+  const ratio = output.aspect_ratio === undefined ? {} : { aspect_ratio: output.aspect_ratio };
   const body =
     route === "xai"
-      ? {
-          model,
-          prompt,
-          n: 1,
-          response_format: "b64_json",
-          resolution: output.resolution,
-          aspect_ratio: output.aspect_ratio,
-        }
+      ? { model, prompt, n: 1, response_format: "b64_json", ...resolution, ...ratio }
       : route === "openai"
         ? { model, prompt, ...output, n, images, mask, markup, ...(stream ? { stream, partial_images } : {}) }
         : {
@@ -930,7 +926,12 @@ async function requestImages(
               responseModalities: ["TEXT", "IMAGE"],
               candidateCount: 1,
               ...(output.resolution !== undefined || output.aspect_ratio !== undefined
-                ? { imageConfig: { imageSize: output.resolution, aspectRatio: output.aspect_ratio } }
+                ? {
+                    imageConfig: {
+                      ...(output.resolution === undefined ? {} : { imageSize: output.resolution }),
+                      ...(output.aspect_ratio === undefined ? {} : { aspectRatio: output.aspect_ratio }),
+                    },
+                  }
                 : {}),
             },
           };
@@ -1017,21 +1018,30 @@ export async function generateNativeImages(
       throw new Error(
         "CLIProxyAPI requires a non-empty prompt; OpenAI prompts are limited to 32000 characters.",
       );
-    const limits = mediaControls(model.id).editing;
+    const controls = mediaControls(model.id);
+    // Pi documents tiers as 1K/2K/4K; xAI spells them 1k/2k.
+    const size = options?.size?.toLowerCase();
+    // Undefined option keys would override defaults that a payload hook puts before its spread.
+    const output =
+      options?.aspectRatio === undefined && options?.size === undefined
+        ? {}
+        : mediaOutputOptions(model.id, {
+            aspect_ratio: options?.aspectRatio,
+            resolution: controls.resolution.find((tier) => tier.toLowerCase() === size) ?? options?.size,
+          });
+    const limits = controls.editing;
     const blocks = context.input.flatMap((block) => (block.type === "image" ? [block] : []));
+    const tooLarge = () =>
+      new Error(
+        "CLIProxyAPI image inputs need an OpenAI image model: at most 16 images, 14 MiB each, 20 MiB total.",
+      );
+    // Reject unsupported routes and counts before decoding any image.
+    if (blocks.length && (!limits || blocks.length > limits.max_images)) throw tooLarge();
     let total = 0;
     const images = blocks.map(({ data }) => {
       const bytes = Buffer.from(data, "base64");
       total += bytes.length;
-      if (
-        !limits ||
-        blocks.length > limits.max_images ||
-        bytes.length > limits.max_file_bytes ||
-        total > limits.max_total_bytes
-      )
-        throw new Error(
-          "CLIProxyAPI image inputs need an OpenAI image model: at most 16 images, 14 MiB each, 20 MiB total.",
-        );
+      if (!limits || bytes.length > limits.max_file_bytes || total > limits.max_total_bytes) throw tooLarge();
       let mimeType: string;
       try {
         ({ mimeType } = imageType(bytes));
@@ -1044,7 +1054,7 @@ export async function generateNativeImages(
       config,
       validateKey(options?.apiKey ?? ""),
       model.id,
-      { prompt, output: {}, ...(images.length ? { images } : {}) },
+      { prompt, output, ...(images.length ? { images } : {}) },
       deadline(options?.signal, capability.route === "openai" ? 600000 : 180000),
       undefined,
       {

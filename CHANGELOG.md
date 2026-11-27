@@ -2,6 +2,11 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.13] - 2026-11-27
+
+- Pi image calls, such as codemode's `models.generateImages()`, honor Pi 1.7's `aspectRatio` and `size` options. Google and xAI image models check them against their `aspect_ratio` and `resolution` controls, and the tier's letter case doesn't matter, so `2K` reaches xAI as `2k`. OpenAI image models reject both, because their size sets the ratio. Before, the extension dropped both options and used the backend defaults.
+- The extension targets Pi 1.7.0 and CLIProxyAPI 8.1.8.
+
 ## [0.3.12] - 2026-11-26
 
 - Copilot models from CLIProxyAPI 8.1's GitHub Copilot provider register with Pi's `github-copilot` metadata, so they get Copilot's context and output limits. Before, discovery skipped Copilot-only IDs such as `claude-sonnet-5.5`, `kimi-k3`, and `mai-code-2`, and gave shared IDs such as `gpt-6.2-sol` the OpenAI limits. Other owners never resolve to Copilot metadata, so Antigravity's `gemini-4-argon` keeps its Google metadata.
