@@ -32,15 +32,15 @@ Chat uses Pi's native API adapters and model metadata, with availability from yo
 
 ## Install
 
-The extension targets Pi 1.6.1 and CLIProxyAPI 8.1.4, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
+The extension targets Pi 1.7.0 and CLIProxyAPI 8.1.8, with Node.js 22.19 or newer. Run CLIProxyAPI with your upstream accounts configured before connecting Pi. The extension uses Pi's host-provided packages, adds no runtime dependencies, and needs no compilation.
 
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.12
+pi install npm:pi-cliproxyapi-native@0.3.13
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.12`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.13`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -200,7 +200,7 @@ Costs are estimates at OpenAI list prices per million tokens: $5 for text input,
 
 When Pi refreshes the catalog, at interactive startup or through `/cliproxyapi-refresh`, the advertised image models also register as Pi image models. Codemode scripts list them with `models.getAvailableOfType("image", "cliproxyapi")` and call `models.generateImages()`, and other extensions can use `ctx.modelRegistry.generateImages()`.
 
-These calls send the prompt with backend defaults. Pi's image interface has no size, quality, count, format, mask, markup, or preview options. Image blocks in the input select OpenAI editing, under the same 16-image, 14 MiB per image, and 20 MiB total limits. Google and xAI models accept text only. Results arrive as image blocks with usage and are not saved to disk. Use `cliproxyapi_generate_image` when you need controls, masks, markup, GIF or SVG output, or saved files.
+These calls send the prompt with backend defaults, plus Pi's optional `aspectRatio` and `size`. Google and xAI models check them against their `aspect_ratio` and `resolution` controls, and the letter case of a `size` tier such as `2K` doesn't matter. OpenAI image models reject both, because their pixel size sets the ratio. Pi's image interface has no quality, count, format, mask, markup, or preview options. Image blocks in the input select OpenAI editing, under the same 16-image, 14 MiB per image, and 20 MiB total limits. Google and xAI models accept text only. Results arrive as image blocks with usage and are not saved to disk. Use `cliproxyapi_generate_image` when you need controls, masks, markup, GIF or SVG output, or saved files.
 
 ### Supported media models
 
@@ -312,7 +312,7 @@ Authentication failures, exhausted quotas, and inputs that exceed the model's co
 
 ### Aliases and model limits
 
-The chat catalog skips unknown IDs rather than guessing their capabilities. Discovery also skips IDs it cannot send or display safely: empty IDs, IDs over 256 characters, and IDs with spaces or non-ASCII characters. A catalog with no usable ID fails as invalid and leaves the current model list in place. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out. For example, CLIProxyAPI 8.1.4 lists `gpt-6-chat-thinking` and `gemini-omni-1.2-flash`, which have no metadata in Pi 1.6.1, so `/cliproxyapi-refresh` reports them as not registered until you add an alias. Pi 1.6.1 includes `claude-fable-5-2`, which registers without one.
+The chat catalog skips unknown IDs rather than guessing their capabilities. Discovery also skips IDs it cannot send or display safely: empty IDs, IDs over 256 characters, and IDs with spaces or non-ASCII characters. A catalog with no usable ID fails as invalid and leaves the current model list in place. Recognized catalog owners resolve duplicate metadata IDs; ambiguous cross-family matches stay out. For example, CLIProxyAPI 8.1.8 lists `gpt-6-chat-thinking` and `gemini-omni-1.2-flash`, which have no metadata in Pi 1.7.0, so `/cliproxyapi-refresh` reports them as not registered until you add an alias. Pi 1.7.0 includes `claude-fable-5-2`, which registers without one.
 
 CLIProxyAPI's GitHub Copilot provider lists its models with the owner `copilot`. Those entries use Pi's `github-copilot` metadata, which carries Copilot's IDs, such as `claude-sonnet-5.5` and `kimi-k3`, and Copilot's context and output limits. A Copilot ID without Copilot metadata in Pi falls back to the native family's entry. Other owners never use Copilot metadata, so an Antigravity `gemini-4-argon` keeps Google's limits.
 
@@ -410,7 +410,7 @@ OpenAI images POST `model`, `prompt`, `n`, and supplied controls to `/v1/images/
 
 OpenAI image POSTs use a dedicated HTTP connection. It follows `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` from the environment, where Pi also places its `httpProxy` setting, on Node 22.21+ and 24.5+. Older Node versions connect directly. The connection disables socket timeouts so the ten-minute deadline controls the request, requests identity encoding, and rejects compressed responses.
 
-The OpenAI image implementation follows CLIProxyAPI v8.1.4's [image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v8.1.4/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v8.1.4/internal/runtime/executor/codex_openai_images.go), plus the OpenAI [generation](https://developers.openai.com/api/reference/resources/images/methods/generate) and [editing](https://developers.openai.com/api/reference/resources/images/methods/edit) references. The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
+The OpenAI image implementation follows CLIProxyAPI v8.1.8's [image handler](https://github.com/router-for-me/CLIProxyAPI/blob/v8.1.8/sdk/api/handlers/openai/openai_images_handlers.go) and [Codex image executor](https://github.com/router-for-me/CLIProxyAPI/blob/v8.1.8/internal/runtime/executor/codex_openai_images.go), plus the OpenAI [generation](https://developers.openai.com/api/reference/resources/images/methods/generate) and [editing](https://developers.openai.com/api/reference/resources/images/methods/edit) references. The xAI and Google routes follow v7.2.158's [video handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/openai/openai_videos_handlers.go), [Gemini handler](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/sdk/api/handlers/gemini/gemini_handlers.go), and [Vertex executor](https://github.com/router-for-me/CLIProxyAPI/blob/v7.2.158/internal/runtime/executor/gemini_vertex_executor.go). See [xAI's video documentation](https://docs.x.ai/developers/model-capabilities/video/generation) for duration and status semantics.
 
 ## License
 
