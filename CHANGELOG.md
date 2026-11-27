@@ -2,6 +2,11 @@
 
 For releases before 0.3.6, see the [GitHub releases](https://github.com/hawkff/pi-cliproxyapi-native/releases).
 
+## [0.3.14] - 2026-11-27
+
+- Pi image calls to OpenAI image models turn `aspectRatio` and `size` into an exact pixel size instead of failing. The ratio stays exact in multiples of 16, and the tier sets a pixel budget as it does on Gemini: `1K` is about one megapixel, so `16:9` becomes `1280x720`, `16:9` at `4K` becomes `3840x2160`, and a square `4K` stops at OpenAI's 8.3-megapixel cap with `2880x2880`. A ratio alone uses `1K`, and a tier alone makes a square image. Ratios above 3:1, sizes OpenAI's limits can't hold exactly, and pixel sizes such as `1024x1536` fail before the request. GPT Image 1.5 accepts only its `1:1`, `3:2`, and `2:3` presets at `1K`. Edits need an `aspectRatio` with `size`, so a tier alone can't reshape the input.
+- OpenAI image payloads leave out unset fields, so defaults that a payload hook places before its spread survive.
+
 ## [0.3.13] - 2026-11-27
 
 - Pi image calls, such as codemode's `models.generateImages()`, honor Pi 1.7's `aspectRatio` and `size` options. Google and xAI image models check them against their `aspect_ratio` and `resolution` controls, and the tier's letter case doesn't matter, so `2K` reaches xAI as `2k`. OpenAI image models reject both, because their size sets the ratio. Before, the extension dropped both options and used the backend defaults.

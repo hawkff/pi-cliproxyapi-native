@@ -919,7 +919,18 @@ async function requestImages(
     route === "xai"
       ? { model, prompt, n: 1, response_format: "b64_json", ...resolution, ...ratio }
       : route === "openai"
-        ? { model, prompt, ...output, n, images, mask, markup, ...(stream ? { stream, partial_images } : {}) }
+        ? Object.fromEntries(
+            Object.entries({
+              model,
+              prompt,
+              ...output,
+              n,
+              images,
+              mask,
+              markup,
+              ...(stream ? { stream, partial_images } : {}),
+            }).filter(([, value]) => value !== undefined),
+          )
         : {
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: {
@@ -995,6 +1006,74 @@ async function requestImages(
   };
 }
 
+// Pi's size tiers as pixel budgets, as Gemini uses them: 1K is about one megapixel at any ratio.
+const tierPixels = new Map([
+  ["1k", 1024 ** 2],
+  ["2k", 2048 ** 2],
+  ["4k", 4096 ** 2],
+]);
+
+// OpenAI has no ratio or tier fields, so Pi's options become an exact WIDTHxHEIGHT or an error.
+function openaiSize(
+  model: string,
+  controls: ReturnType<typeof mediaControls>,
+  aspectRatio: unknown,
+  tier: unknown,
+  editing: boolean,
+) {
+  // Codemode passes script values unchecked; anything but a string or undefined fails.
+  const ratio =
+    aspectRatio === undefined
+      ? ["1", "1"]
+      : typeof aspectRatio === "string"
+        ? /^([1-9]\d{0,3}):([1-9]\d{0,3})$/.exec(aspectRatio)?.slice(1)
+        : undefined;
+  const budget =
+    tier === undefined
+      ? tierPixels.get("1k")
+      : typeof tier === "string"
+        ? tierPixels.get(tier.toLowerCase())
+        : undefined;
+  if (!ratio || !budget)
+    throw new Error(
+      `CLIProxyAPI ${model} takes aspectRatio as whole numbers such as 16:9 and size as 1K, 2K, or 4K.`,
+    );
+  // A tier alone would make an edit square instead of following its input.
+  if (aspectRatio === undefined && editing)
+    throw new Error("CLIProxyAPI OpenAI edits need an aspectRatio when size is set.");
+  let [a, b] = ratio.map(Number);
+  let divisor = a;
+  for (let rest = b; rest; ) [divisor, rest] = [rest, divisor % rest];
+  a /= divisor;
+  b /= divisor;
+  const { size: presets, size_limits: limits } = controls;
+  if (!limits) {
+    // GPT Image 1.5 has only its three presets, each about one megapixel.
+    const preset =
+      budget === tierPixels.get("1k")
+        ? presets.find((value) => {
+            const [width, height] = value.split("x").map(Number);
+            return width * b === height * a;
+          })
+        : undefined;
+    if (!preset) throw new Error(`CLIProxyAPI ${model} supports only 1:1, 3:2, and 2:3 at 1K.`);
+    return preset;
+  }
+  const step = limits.multiple_of;
+  const ceiling = Math.min(budget, limits.max_pixels);
+  const fits = (k: number) =>
+    step * k * Math.max(a, b) <= limits.max_edge && step * k * a * step * k * b <= ceiling;
+  // The largest exact multiple within the tier's budget and the edge limit; never a nearby ratio.
+  let k = Math.floor(Math.sqrt(ceiling / (step * step * a * b))) + 1;
+  while (k > 0 && !fits(k)) k--;
+  const [width, height] = [step * k * a, step * k * b];
+  if (!k || Math.max(a, b) > limits.max_aspect_ratio * Math.min(a, b) || width * height < limits.min_pixels)
+    throw new Error(
+      `CLIProxyAPI ${model} cannot make an exact ${a}:${b} image at ${tier ?? "1K"} within its size limits; ratios go up to 3:1.`,
+    );
+  return `${width}x${height}`;
+}
+
 export async function generateNativeImages(
   config: Config,
   model: ImageModel<ImageApi>,
@@ -1019,18 +1098,31 @@ export async function generateNativeImages(
         "CLIProxyAPI requires a non-empty prompt; OpenAI prompts are limited to 32000 characters.",
       );
     const controls = mediaControls(model.id);
+    const blocks = context.input.flatMap((block) => (block.type === "image" ? [block] : []));
     // Pi documents tiers as 1K/2K/4K; xAI spells them 1k/2k.
-    const size = options?.size?.toLowerCase();
-    // Undefined option keys would override defaults that a payload hook puts before its spread.
+    const size = typeof options?.size === "string" ? options.size.toLowerCase() : undefined;
     const output =
       options?.aspectRatio === undefined && options?.size === undefined
         ? {}
-        : mediaOutputOptions(model.id, {
-            aspect_ratio: options?.aspectRatio,
-            resolution: controls.resolution.find((tier) => tier.toLowerCase() === size) ?? options?.size,
-          });
+        : mediaOutputOptions(
+            model.id,
+            capability.route === "openai"
+              ? {
+                  size: openaiSize(
+                    model.id,
+                    controls,
+                    options?.aspectRatio,
+                    options?.size,
+                    blocks.length > 0,
+                  ),
+                }
+              : {
+                  aspect_ratio: options?.aspectRatio,
+                  resolution:
+                    controls.resolution.find((tier) => tier.toLowerCase() === size) ?? options?.size,
+                },
+          );
     const limits = controls.editing;
-    const blocks = context.input.flatMap((block) => (block.type === "image" ? [block] : []));
     const tooLarge = () =>
       new Error(
         "CLIProxyAPI image inputs need an OpenAI image model: at most 16 images, 14 MiB each, 20 MiB total.",

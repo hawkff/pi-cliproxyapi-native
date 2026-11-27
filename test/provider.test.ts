@@ -2714,9 +2714,9 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
     },
   });
   const unsupported = await models.generateImages(
-    image,
+    gemini,
     { input: [{ type: "text", text: "fixture" }] },
-    { aspectRatio: "16:9" },
+    { aspectRatio: "9:21" },
   );
   assert.equal(unsupported.stopReason, "error");
   assert.match(unsupported.errorMessage ?? "", /aspect_ratio is unsupported/);
@@ -2762,6 +2762,97 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
   const tieredBody = bodies[7]?.body;
   assert.ok(isRecord(tieredBody) && isRecord(tieredBody.generationConfig));
   assert.deepEqual(tieredBody.generationConfig.imageConfig, { aspectRatio: "16:9", imageSize: "2K" });
+});
+
+test("Pi image options become exact OpenAI sizes within the tier budget or fail before the request", async (t) => {
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=";
+  const bodies: { path: string | undefined; body: unknown }[] = [];
+  const baseUrl = await server(t, (req, res) => {
+    if (req.method === "GET")
+      return void res.end(
+        JSON.stringify({ data: [{ id: "api/gpt-image-2.5-sunburst" }, { id: "api/gpt-image-1.5" }] }),
+      );
+    let text = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      text += chunk;
+    });
+    req.on("end", () => {
+      bodies.push({ path: req.url, body: JSON.parse(text) });
+      res.end(JSON.stringify({ data: [{ b64_json: png }] }));
+    });
+  });
+  const { models } = await collection(baseUrl);
+  await models.refresh();
+  const custom = models.getModelOfType("image", PROVIDER_ID, "api/gpt-image-2.5-sunburst");
+  const presets = models.getModelOfType("image", PROVIDER_ID, "api/gpt-image-1.5");
+  assert.ok(custom && presets);
+  const prompt = { input: [{ type: "text" as const, text: "fixture" }] };
+  const sizeOf = async (model: typeof custom, options: { aspectRatio?: string; size?: string }) => {
+    const result = await models.generateImages(model, prompt, options);
+    assert.equal(result.stopReason, "stop", result.errorMessage);
+    const body = bodies.at(-1)?.body;
+    return isRecord(body) ? body.size : undefined;
+  };
+  // Tiers are pixel budgets; each size keeps the exact ratio in multiples of 16 within OpenAI's limits.
+  for (const [options, size] of [
+    [{ aspectRatio: "16:9" }, "1280x720"],
+    [{ aspectRatio: "16:9", size: "4K" }, "3840x2160"],
+    [{ size: "4k" }, "2880x2880"],
+    [{ size: "2K" }, "2048x2048"],
+    [{ aspectRatio: "1:3" }, "576x1728"],
+    [{ aspectRatio: "21:9", size: "2K" }, "3024x1296"],
+    // The edge limit binds before the pixel cap, and a coarse ratio fits a larger tier.
+    [{ aspectRatio: "3:1", size: "4K" }, "3840x1280"],
+    [{ aspectRatio: "97:96", size: "2K" }, "1552x1536"],
+  ] as const)
+    assert.equal(await sizeOf(custom, options), size, JSON.stringify(options));
+  assert.equal(await sizeOf(presets, { aspectRatio: "3:2" }), "1536x1024");
+  assert.equal(await sizeOf(presets, { size: "1K" }), "1024x1024");
+  const sent = bodies.length;
+  for (const [model, options, message] of [
+    [custom, { aspectRatio: "16:9 " }, /whole numbers/],
+    [custom, { aspectRatio: "0:1" }, /whole numbers/],
+    [custom, { aspectRatio: "1.5:1" }, /whole numbers/],
+    [custom, { size: "1024x1536" }, /whole numbers/],
+    [custom, { size: "auto" }, /whole numbers/],
+    [custom, { aspectRatio: "4:1" }, /exact 4:1 image/],
+    [custom, { aspectRatio: "97:96" }, /exact 97:96 image/],
+    [custom, { aspectRatio: "9999:1" }, /exact 9999:1 image/],
+    // The largest 51:50 size within 1K, 816x800, is below OpenAI's minimum.
+    [custom, { aspectRatio: "51:50" }, /exact 51:50 image/],
+    [custom, { size: "constructor" }, /whole numbers/],
+    [custom, { size: null as unknown as string }, /whole numbers/],
+    [custom, { aspectRatio: ["16:9"] as unknown as string }, /whole numbers/],
+    [presets, { aspectRatio: "16:9" }, /only 1:1, 3:2, and 2:3 at 1K/],
+    [presets, { size: "2K" }, /only 1:1, 3:2, and 2:3 at 1K/],
+  ] as const) {
+    const result = await models.generateImages(model, prompt, options);
+    assert.equal(result.stopReason, "error", JSON.stringify(options));
+    assert.match(result.errorMessage ?? "", message);
+  }
+  const edit = { input: [...prompt.input, { type: "image" as const, data: png, mimeType: "image/png" }] };
+  const square = await models.generateImages(custom, edit, { size: "2K" });
+  assert.match(square.errorMessage ?? "", /edits need an aspectRatio/);
+  assert.equal(bodies.length, sent);
+  const edited = await models.generateImages(custom, edit, { aspectRatio: "2:3" });
+  assert.equal(edited.stopReason, "stop", edited.errorMessage);
+  assert.equal(bodies.at(-1)?.path, "/v1/images/edits");
+  const editBody = bodies.at(-1)?.body;
+  assert.ok(isRecord(editBody) && editBody.size === "832x1248");
+  // Unset controls stay out of the payload, so a hook's defaults before its spread survive.
+  const hooked = await models.generateImages(custom, prompt, {
+    aspectRatio: "1:1",
+    onPayload: (payload) => (isRecord(payload) ? { quality: "low", ...payload } : payload),
+  });
+  assert.equal(hooked.stopReason, "stop", hooked.errorMessage);
+  assert.deepEqual(bodies.at(-1)?.body, {
+    quality: "low",
+    model: "api/gpt-image-2.5-sunburst",
+    prompt: "fixture",
+    size: "1024x1024",
+    n: 1,
+  });
 });
 
 const responsesFlags = [
