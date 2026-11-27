@@ -37,10 +37,10 @@ The extension targets Pi 1.7.0 and CLIProxyAPI 8.1.8, with Node.js 22.19 or newe
 If you installed `pi-cliproxy-native`, remove it before installing the renamed package. Both register the same `cliproxyapi` provider.
 
 ```sh
-pi install npm:pi-cliproxyapi-native@0.3.13
+pi install npm:pi-cliproxyapi-native@0.3.14
 ```
 
-For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.13`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
+For Git installation, use `pi install git:github.com/hawkff/pi-cliproxyapi-native@v0.3.14`. For a local checkout, use `pi install /path/to/pi-cliproxyapi-native`. After an update, Pi shows the new [changelog](CHANGELOG.md) entries under "Extension Updates" on its next launch.
 
 The default proxy address is `http://localhost:8317`. For another address, set the [connection](#connection) before logging in. Restart Pi, then run:
 
@@ -200,7 +200,7 @@ Costs are estimates at OpenAI list prices per million tokens: $5 for text input,
 
 When Pi refreshes the catalog, at interactive startup or through `/cliproxyapi-refresh`, the advertised image models also register as Pi image models. Codemode scripts list them with `models.getAvailableOfType("image", "cliproxyapi")` and call `models.generateImages()`, and other extensions can use `ctx.modelRegistry.generateImages()`.
 
-These calls send the prompt with backend defaults, plus Pi's optional `aspectRatio` and `size`. Google and xAI models check them against their `aspect_ratio` and `resolution` controls, and the letter case of a `size` tier such as `2K` doesn't matter. OpenAI image models reject both, because their pixel size sets the ratio. Pi's image interface has no quality, count, format, mask, markup, or preview options. Image blocks in the input select OpenAI editing, under the same 16-image, 14 MiB per image, and 20 MiB total limits. Google and xAI models accept text only. Results arrive as image blocks with usage and are not saved to disk. Use `cliproxyapi_generate_image` when you need controls, masks, markup, GIF or SVG output, or saved files.
+These calls send the prompt with backend defaults, plus Pi's optional `aspectRatio` and `size`. Google and xAI models check them against their `aspect_ratio` and `resolution` controls, and the letter case of a `size` tier such as `2K` doesn't matter. OpenAI image models have no ratio or tier fields, so the extension turns both into an exact pixel size. The ratio scales in multiples of 16 to the largest size within the tier's pixel budget, the 3,840-pixel edge limit, and a 3:1 ratio limit. As on Gemini, `1K` is about one megapixel, `2K` about four, and `4K` about sixteen, capped at OpenAI's 8.3-megapixel maximum. For example, `16:9` becomes `1280x720`, `16:9` at `4K` becomes `3840x2160`, and a square `4K` becomes `2880x2880`. A ratio alone uses `1K`, a tier alone makes a square image, and edits need an `aspectRatio` when `size` is set. GPT Image 1.5 accepts only `1:1`, `3:2`, and `2:3` at `1K`, its preset sizes. Ratios the limits can't hold exactly, and pixel sizes such as `1024x1536`, fail before the request. Pi's image interface has no quality, count, format, mask, markup, or preview options. Image blocks in the input select OpenAI editing, under the same 16-image, 14 MiB per image, and 20 MiB total limits. Google and xAI models accept text only. Results arrive as image blocks with usage and are not saved to disk. Use `cliproxyapi_generate_image` when you need controls, masks, markup, GIF or SVG output, or saved files.
 
 ### Supported media models
 
