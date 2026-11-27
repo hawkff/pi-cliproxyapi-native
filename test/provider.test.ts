@@ -2567,7 +2567,12 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
     if (req.method === "GET")
       return void res.end(
         JSON.stringify({
-          data: [{ id }, { id: "gemini-3-pro-image" }, { id: "api/gpt-image-2.6-flare" }],
+          data: [
+            { id },
+            { id: "gemini-3-pro-image" },
+            { id: "api/gpt-image-2.6-flare" },
+            { id: "grok-imagine-image" },
+          ],
         }),
       );
     let text = "";
@@ -2582,6 +2587,17 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
         return void res
           .writeHead(status, { "content-type": "application/json" })
           .end(JSON.stringify({ error: { message: `Rejected for ${key}` } }));
+      if (req.url?.endsWith(":generateContent"))
+        return void res.end(
+          JSON.stringify({
+            candidates: [
+              {
+                finishReason: "STOP",
+                content: { parts: [{ inlineData: { mimeType: "image/png", data: png } }] },
+              },
+            ],
+          }),
+        );
       res.end(
         JSON.stringify({
           data: [{ b64_json: isRecord(body) && body.output_format === "gif" ? gif : png }],
@@ -2677,6 +2693,75 @@ test("Pi image calls reuse proxy validation, honor payload hooks, report usage, 
   );
   assert.equal(aborted.stopReason, "aborted");
   assert.equal(bodies.length, 4);
+  status = 200;
+  // Pi's aspectRatio and size tier map to the route's controls; tier spelling is matched case-insensitively.
+  const sized = await models.generateImages(
+    gemini,
+    { input: [{ type: "text", text: "fixture" }] },
+    { aspectRatio: "16:9", size: "2k" },
+  );
+  assert.equal(sized.stopReason, "stop", sized.errorMessage);
+  assert.deepEqual(sized.output, [{ type: "image", data: png, mimeType: "image/png" }]);
+  assert.deepEqual(bodies[4], {
+    path: "/v1beta/models/gemini-3-pro-image:generateContent",
+    body: {
+      contents: [{ role: "user", parts: [{ text: "fixture" }] }],
+      generationConfig: {
+        responseModalities: ["TEXT", "IMAGE"],
+        candidateCount: 1,
+        imageConfig: { imageSize: "2K", aspectRatio: "16:9" },
+      },
+    },
+  });
+  const unsupported = await models.generateImages(
+    image,
+    { input: [{ type: "text", text: "fixture" }] },
+    { aspectRatio: "16:9" },
+  );
+  assert.equal(unsupported.stopReason, "error");
+  assert.match(unsupported.errorMessage ?? "", /aspect_ratio is unsupported/);
+  assert.equal(bodies.length, 5);
+  const grok = models.getModelOfType("image", PROVIDER_ID, "grok-imagine-image");
+  assert.ok(grok);
+  const xai = await models.generateImages(
+    grok,
+    { input: [{ type: "text", text: "fixture" }] },
+    { size: "2K" },
+  );
+  assert.equal(xai.stopReason, "stop", xai.errorMessage);
+  assert.deepEqual(bodies[5]?.body, {
+    model: "grok-imagine-image",
+    prompt: "fixture",
+    n: 1,
+    response_format: "b64_json",
+    resolution: "2k",
+  });
+  // Without Pi options, a hook's defaults placed before its spread survive.
+  const hooked = await models.generateImages(
+    image,
+    { input: [{ type: "text", text: "fixture" }] },
+    { onPayload: (payload) => (isRecord(payload) ? { quality: "low", ...payload } : payload) },
+  );
+  assert.equal(hooked.stopReason, "stop", hooked.errorMessage);
+  assert.deepEqual(bodies[6]?.body, { quality: "low", model: id, prompt: "fixture", n: 1 });
+  // One Pi option leaves the other key out, so a hook's nested default survives too.
+  const tiered = await models.generateImages(
+    gemini,
+    { input: [{ type: "text", text: "fixture" }] },
+    {
+      size: "2K",
+      onPayload: (payload) => {
+        const config = isRecord(payload) ? payload.generationConfig : undefined;
+        if (!isRecord(payload) || !isRecord(config) || !isRecord(config.imageConfig)) return payload;
+        const imageConfig = { aspectRatio: "16:9", ...config.imageConfig };
+        return { ...payload, generationConfig: { ...config, imageConfig } };
+      },
+    },
+  );
+  assert.equal(tiered.stopReason, "stop", tiered.errorMessage);
+  const tieredBody = bodies[7]?.body;
+  assert.ok(isRecord(tieredBody) && isRecord(tieredBody.generationConfig));
+  assert.deepEqual(tieredBody.generationConfig.imageConfig, { aspectRatio: "16:9", imageSize: "2K" });
 });
 
 const responsesFlags = [
